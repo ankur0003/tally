@@ -1,0 +1,32 @@
+[Unit]
+Description=tally algo trading server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tally
+Group=tally
+EnvironmentFile=/etc/tally/tally.env
+Environment=TALLY_DATA_DIR=/var/lib/tally
+WorkingDirectory=/var/lib/tally
+ExecStart=/usr/bin/java -Xms256m -Xmx1g -XX:+ExitOnOutOfMemoryError -Duser.timezone=Asia/Kolkata -jar /opt/tally/tally.jar
+Restart=on-failure
+RestartSec=10
+SuccessExitStatus=143
+
+# Hardening: the service can only write its own data dir.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/var/lib/tally
+
+[Install]
+WantedBy=multi-user.target

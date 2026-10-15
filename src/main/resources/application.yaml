@@ -1,0 +1,102 @@
+ktor:
+  deployment:
+    # Bind to loopback only: this server can place real orders, never expose it to the network.
+    host: 127.0.0.1
+    port: 8090
+  application:
+    modules:
+      - com.tally.ApplicationKt.module
+
+tally:
+  # PAPER = simulated fills against live prices. LIVE = real orders on Zerodha.
+  mode: "$TALLY_MODE:PAPER"
+  # Required on every /api request as header X-Tally-Token. If empty, a random one is generated and logged at startup.
+  apiToken: "$TALLY_API_TOKEN:"
+  dataDir: "$TALLY_DATA_DIR:"
+  # Hostname served by Caddy (deploy/setup-https.sh). The dashboard on that origin may call the API.
+  publicHost: "$TALLY_PUBLIC_HOST:"
+
+  kite:
+    apiKey: "$KITE_API_KEY:"
+    apiSecret: "$KITE_API_SECRET:"
+    # Your Zerodha client ID (e.g. AB1234). Logins from any other account are rejected.
+    userId: "$KITE_USER_ID:"
+    baseUrl: "https://api.kite.trade"
+    loginUrl: "https://kite.zerodha.com/connect/login"
+
+  anthropic:
+    apiKey: "$ANTHROPIC_API_KEY:"
+    model: "claude-opus-5-5"
+
+  risk:
+    killSwitch: false
+    maxDailyLoss: 1500           # INR, whole account. New entries blocked once day P&L <= -maxDailyLoss
+    maxOrderValue: 25000         # INR notional per order (premium value for options)
+    maxOpenPositions: 5
+    maxOrdersPerDay: 40
+    intradayEntryCutoff: "15:00" # IST, no new MIS/intraday entries after this
+    intradaySquareOff: "15:15"   # IST, runner flattens intraday positions after this
+    allowedExchanges: [ "NSE", "BSE", "NFO" ]
+
+  # Claude market intelligence + index trade ideas, executed by buying ATM NIFTY/BANKNIFTY options.
+  ai:
+    scheduler: true              # run briefs/ideas automatically during market hours
+    briefMinutes: 120            # news + global ripple brief (web search, ~$0.55 each)
+    ideaMinutes: 15              # index trade ideas from live data + latest brief (~$0.05 each)
+    minConfidence: 80            # ideas below this are shown as "watch" and can't be traded (manual or auto)
+    minRewardRisk: 1.5
+    dailyBudgetUsd: 6.0          # scheduled AI calls pause for the day once spend reaches this
+    autoTrade: false             # start off; enable from the dashboard
+    allowShort: true             # SHORT ideas are traded by buying puts (options are never sold to open)
+    # First-run defaults only: after that, capital / limits / profit goal are edited on the dashboard (ai_settings.json).
+    capital: 1000                # INR premium per trade
+    maxLossPerTrade: 250         # INR; lots are sized so the stop-loss costs at most this
+    maxDailyLoss: 300            # INR; no new AI trades for the day after this much AI-trade loss
+    # Stock options: every stockIdeaMinutes the day's biggest movers in this list are analysed (~$0.10 per scan).
+    stockIdeaMinutes: 30
+    stockShortlist: 6
+    stocks: [ "RELIANCE", "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK", "BHARTIARTL", "INFY",
+              "TCS", "LT", "ITC", "BAJFINANCE", "MARUTI", "SUNPHARMA", "HINDUNILVR", "M&M" ]
+
+  paper:
+    startingCash: 500000
+    slippageBps: 5
+
+  strategies:
+    pollSeconds: 30
+    instances:
+      - id: "nifty-ema-options"
+        strategy: "ema_crossover"
+        exchange: "NSE"
+        symbol: "NIFTY 50"
+        interval: "5minute"
+        execution: "INDEX_OPTIONS"   # LONG -> buy ATM CE, SHORT -> buy ATM PE
+        optionsUnderlying: "NIFTY"
+        lots: 1
+        stopLossPct: 25              # % of option premium
+        targetPct: 50
+        autoTrade: false             # signals only until you flip this
+        enabled: true
+      - id: "banknifty-orb-options"
+        strategy: "opening_range_breakout"
+        exchange: "NSE"
+        symbol: "NIFTY BANK"
+        interval: "5minute"
+        execution: "INDEX_OPTIONS"
+        optionsUnderlying: "BANKNIFTY"
+        lots: 1
+        stopLossPct: 25
+        targetPct: 50
+        autoTrade: false
+        enabled: true
+      - id: "reliance-swing"
+        strategy: "ema_crossover"
+        exchange: "NSE"
+        symbol: "RELIANCE"
+        interval: "day"
+        execution: "EQUITY_SWING"    # CNC delivery, long-only
+        quantity: 5
+        stopLossPct: 6
+        targetPct: 15
+        autoTrade: false
+        enabled: false
