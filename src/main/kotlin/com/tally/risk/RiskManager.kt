@@ -84,10 +84,8 @@ class RiskManager(
         if (killSwitch) return reject("Kill switch engaged: $killReason")
 
         val pnl = dayPnl(positions)
-        if (pnl <= -cfg.maxDailyLoss) {
-            setKillSwitch(true, "Daily loss limit hit (P&L %.0f)".format(pnl))
-            return reject("Daily loss limit reached")
-        }
+        // Blocks entries only while the day's P&L is past the limit; nothing latches, so the next day starts clean.
+        if (pnl <= -cfg.maxDailyLoss) return reject("Daily loss limit reached (P&L %.0f)".format(pnl))
         val intraday = req.product == Product.MIS || req.exchange == "NFO"
         if (intraday && clock.isAfter(cfg.intradayEntryCutoff, now)) {
             return reject("No new intraday entries after ${cfg.intradayEntryCutoff}")

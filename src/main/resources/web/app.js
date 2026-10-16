@@ -132,59 +132,7 @@ async function loadCharts() {
   }));
 }
 
-// ---------------------------------------------------------------- global
-
-async function loadGlobal() {
-  try {
-    const qs = await api("/global");
-    $("global").replaceChildren(...qs.map((q) => el("div", { class: "gq", title: `${q.symbol} · ${q.group}` },
-      el("span", { class: "name", text: q.name }),
-      el("span", { class: "num" },
-        el("span", { text: q.price == null ? "n/a" : inr(q.price, q.price > 1000 ? 0 : 2) + " " }),
-        el("span", { class: cls(q.changePct), text: q.changePct == null ? "" : signed(q.changePct, 2, "%") }),
-      ),
-    )));
-  } catch (e) { $("global").replaceChildren(el("div", { class: "empty", text: "Global data unavailable: " + e.message })); }
-}
-
 // ---------------------------------------------------------------- AI ideas
-
-function renderIdeas(ai) {
-  $("minconf").textContent = `Suggestions need ≥${ai.minConfidence}% confidence plus rule checks`;
-  $("marketview").textContent = ai.run ? `${timeOf(ai.run.at)} · ${ai.run.marketView}` : "No analysis yet today. Runs every 15 min while the market is open, or press Analyze now.";
-  const latest = ai.run ? new Set(ai.run.ideaIds) : new Set();
-  const ideas = ai.ideas.filter((i) => i.kind !== "STOCK" && (i.action !== "NO_TRADE" || latest.has(i.id))).slice(0, 10);
-  // Below-the-bar ideas get their trade button only in the High-risk section.
-  const risky = new Set(ai.highRiskIds || []);
-  if (!ideas.length) { $("ideas").replaceChildren(el("div", { class: "empty", text: "No ideas yet." })); }
-  else $("ideas").replaceChildren(...ideas.map((i) => ideaCard(i, risky.has(i.id) ? null : ai.plans?.[i.id], busyReason(ai, i))));
-
-  $("stats").replaceChildren(el("table", { class: "t" },
-    el("tr", {}, ...["Confidence", "Ideas", "Scored", "Hit", "Stopped", "Expired", "Hit rate"].map((h, i) => el("th", { class: i ? "r" : "", text: h }))),
-    ...ai.stats.map((b) => el("tr", {},
-      el("td", { text: b.bucket }), el("td", { class: "r", text: b.ideas }), el("td", { class: "r", text: b.resolved }),
-      el("td", { class: "r", text: b.targets }), el("td", { class: "r", text: b.stops }), el("td", { class: "r", text: b.expired }),
-      el("td", { class: "r", text: b.hitRatePct == null ? "–" : b.hitRatePct.toFixed(0) + "%" }),
-    )),
-  ));
-}
-
-/** Stock options: only ideas that clear the confidence bar and every rule check get a trade plan. */
-function renderStockIdeas(ai) {
-  const n = ai.stockWatchlist.length;
-  $("stock-sub").textContent = `Biggest movers of ${n} F&O stocks, scanned every 30 min · trades need ≥${ai.minConfidence}%`;
-  $("stock-view").textContent = ai.stockRun ? `${timeOf(ai.stockRun.at)} · ${ai.stockRun.marketView}` : "No stock scan yet today. Runs every 30 min from 09:30 while the market is open, or press Scan now.";
-  const latest = ai.stockRun ? new Set(ai.stockRun.ideaIds) : new Set();
-  const stock = ai.ideas.filter((i) => i.kind === "STOCK");
-  // Paper test ideas show here too so the stock-option pipeline can be tried.
-  const top = stock.filter((i) => (i.qualified || i.id.startsWith("test-")) && i.status === "OPEN");
-  const watch = stock.filter((i) => latest.has(i.id) && !(i.qualified && i.status === "OPEN"));
-  $("stock-ideas").replaceChildren(...(top.length
-    ? top.map((i) => ideaCard(i, ai.plans?.[i.id], busyReason(ai, i)))
-    : [el("div", { class: "empty", text: `No stock idea at ≥${ai.minConfidence}% right now. That is normal: most scans should find nothing worth risking money on.` })]));
-  $("stock-watch-sum").textContent = `Below the confidence bar: watch only (${watch.length})`;
-  $("stock-watch").replaceChildren(...watch.map((i) => ideaCard(i, null, true)));
-}
 
 /** Below-the-bar ideas with Claude's speculative TAKE/SKIP call. Manual only. */
 function renderRisky(ai) {
@@ -349,8 +297,6 @@ function renderTrader(t, mode) {
   $("trader-limits").textContent = `${mode} · capital ₹${inr(st.capital, 0)} · max loss ₹${inr(st.maxLossPerTrade, 0)}/trade, ₹${inr(st.maxDailyLoss, 0)}/day` +
     (st.dailyProfitGoal > 0 ? ` · goal +₹${inr(st.dailyProfitGoal, 0)}/day` : "");
   renderSettings(st);
-  const sw = $("autotrade");
-  if (document.activeElement !== sw) sw.checked = t.autoTrade;
 
   const parts = [];
   if (t.lossBudgetLeft < 1) parts.push(el("div", { class: "banner", text: "Daily AI loss limit reached. No new trades until tomorrow." }));
@@ -379,6 +325,7 @@ function renderTrader(t, mode) {
       el("div", { class: "row" },
         el("span", { class: "act up", text: `${o.symbol} × ${o.quantity}` }),
         o.source === "high-risk" ? el("span", { class: "tag miss", text: "high risk" }) : null,
+        o.source === "ai-trader" ? el("span", { class: "tag go", text: "AI trader" }) : null,
         el("span", { class: "num " + cls(v.pnl), text: v.pnl == null ? "" : rupees(v.pnl, 2) + (mult ? ` (${mult.toFixed(2)}x)` : "") }),
         el("span", { class: "spacer" }),
         el("button", { class: "btn danger", text: "Close now", onclick: (e) => withBusy(e.target, async () => {
@@ -394,7 +341,7 @@ function renderTrader(t, mode) {
     }) })));
   }
   if (!t.opens.length && !t.pendings.length) {
-    parts.push(el("div", { class: "empty", text: t.autoTrade ? "Auto-trade on: waiting for qualified ideas (≥ confidence threshold and all rule checks)." : "No trade open. Use Take trade on an idea, or switch on auto-trade." }));
+    parts.push(el("div", { class: "empty", text: "No AI trade open right now." }));
   }
   if (t.closedToday.length) {
     parts.push(el("table", { class: "t" },
@@ -410,15 +357,71 @@ function renderTrader(t, mode) {
   $("trader").replaceChildren(...parts);
 }
 
-$("autotrade").addEventListener("change", async (e) => {
-  const on = e.target.checked;
+// ---------------------------------------------------------------- AI trader (fund manager)
+
+let deskFundDirty = false;
+function renderDesk(d) {
+  const sw = $("desk-on");
+  if (document.activeElement !== sw) sw.checked = d.enabled;
+  if (!deskFundDirty && document.activeElement !== $("desk-fund")) $("desk-fund").value = d.fund || "";
+  const kv = (k, v, c = "") => el("div", { class: "kv" }, el("span", { text: k }), el("span", { class: "num " + c, text: v }));
+  const parts = [
+    d.enabled ? null : el("div", { class: "empty", text: "AI trader is off. Set a fund and switch on “Let AI trade”." }),
+    kv("Fund", `${rupees(d.fund, 0)} · in use ${rupees(d.fundInUse, 0)} · free ${rupees(d.fundFree, 0)}`),
+  ];
+  const last = d.runs[0];
+  if (last) {
+    parts.push(el("div", { class: "idea" },
+      el("div", { class: "row" },
+        el("span", { class: "act", text: "Fund manager's call" }),
+        el("span", { class: "stance " + last.stance, text: last.stance === "LONG" ? "▲ LONG market" : last.stance === "SHORT" ? "▼ SHORT market" : "— NEUTRAL" }),
+        el("span", { class: "spacer" }),
+        el("span", { class: "muted small", text: `${timeOf(last.at)} · $${last.costUsd.toFixed(2)}` }),
+      ),
+      el("p", { class: "why", text: last.marketView }),
+      el("p", { class: "inv", text: "Looked at: " + (last.considered.join(", ") || "–") }),
+      ...last.picks.map((p) => el("p", { class: "verdict" },
+        el("strong", { class: p.action === "LONG" ? "up" : "down", text: `${p.underlying} ${p.action} · ${p.riskPct}% risk: ` }),
+        `${p.reason} → ${p.result}`)),
+      last.passReason ? el("p", { class: "inv", text: "Passed: " + last.passReason }) : null,
+    ));
+  }
+  if (d.runs.length > 1) {
+    parts.push(el("details", { class: "track" },
+      el("summary", { text: `Earlier decisions today (${d.runs.length - 1})` }),
+      el("ul", { class: "log" }, ...d.runs.slice(1).map((r) => el("li", {
+        text: `${timeOf(r.at)} ${r.stance} · ${r.picks.length ? r.picks.map((p) => `${p.underlying} ${p.action} ${p.riskPct}% → ${p.result}`).join("; ") : "no trade: " + r.passReason}`,
+      }))),
+    ));
+  }
+  $("desk").replaceChildren(...parts.filter(Boolean));
+}
+
+async function saveDesk(enabled) {
+  const fund = parseFloat($("desk-fund").value) || 0;
   const live = $("mode").textContent === "LIVE";
-  if (on && !confirm(live
-    ? "LIVE mode: auto-trade will place REAL orders with real money within your limits. Continue?"
-    : "Enable auto-trade in PAPER mode (simulated orders)?")) { e.target.checked = false; return; }
-  try { await post("/ai/autotrade", { on, confirmLive: live }); } catch (err) { alert(err.message); }
+  if (enabled && !confirm(live
+    ? `LIVE: the AI will place REAL orders on its own, using up to ${rupees(fund, 0)} of premium at a time, within your loss limits. Continue?`
+    : `PAPER: let the AI trade on its own with up to ${rupees(fund, 0)} (simulated)?`)) return false;
+  await put("/ai/desk", { enabled, fund, confirmLive: live });
+  deskFundDirty = false;
+  $("desk-msg").textContent = "Saved " + new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
+  return true;
+}
+$("desk-fund").addEventListener("input", () => { deskFundDirty = true; });
+$("desk-on").addEventListener("change", async (e) => {
+  try { if (!(await saveDesk(e.target.checked))) e.target.checked = false; } catch (err) { e.target.checked = !e.target.checked; alert(err.message); }
   refreshAll();
 });
+$("desk-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  await withBusy(e.submitter, async () => { await saveDesk($("desk-on").checked); refreshAll(); });
+});
+$("desk-run").addEventListener("click", (e) => withBusy(e.target, async () => {
+  const r = await post("/ai/desk/run");
+  if (!r.run) alert("Nothing to decide: the AI trader is off, no new LONG/SHORT idea is open, the market is closed, or your limits leave no room.");
+  refreshAll();
+}));
 
 // ---------------------------------------------------------------- bot mood
 
@@ -497,13 +500,9 @@ function renderPositions(ps) {
 }
 
 function renderRisk(r, equityNet, ordersToday) {
-  const kill = $("kill");
-  kill.classList.toggle("on", !!r?.killSwitch);
-  kill.textContent = r?.killSwitch ? "Kill switch ON" : "Kill switch";
   if (!r) { $("risk").replaceChildren(el("div", { class: "empty", text: "–" })); return; }
   const kv = (k, v, c = "") => el("div", { class: "kv" }, el("span", { text: k }), el("span", { class: "num " + c, text: v }));
   $("risk").replaceChildren(
-    r.killSwitch ? el("div", { class: "banner", text: "Kill switch: " + (r.killReason || "on") }) : null,
     kv("Cash (equity net)", equityNet == null ? "–" : rupees(Number(equityNet), 2)),
     kv("Day P&L", rupees(r.dayPnl, 2), cls(r.dayPnl)),
     kv("Daily loss limit", rupees(r.maxDailyLoss)),
@@ -518,25 +517,15 @@ $("kite-logout").addEventListener("click", (e) => withBusy(e.target, async () =>
   await post("/auth/logout");
   refreshAll();
 }));
-$("kill").addEventListener("click", (e) => withBusy(e.target, async () => {
-  const on = !e.target.classList.contains("on");
-  await post("/risk/kill-switch", { on, reason: on ? "Dashboard" : "Released from dashboard" });
-  refreshAll();
-}));
 $("squareoff").addEventListener("click", (e) => withBusy(e.target, async () => {
-  if (!confirm("Engage the kill switch and exit EVERY open position at market?")) return;
+  if (!confirm("Switch off the AI trader and exit EVERY open position at market?")) return;
   await post("/squareoff");
   refreshAll();
 }));
-$("test-idea").addEventListener("click", (e) => withBusy(e.target, async () => {
-  const index = (prompt("Underlying for the test idea: NIFTY, BANKNIFTY or an F&O stock like BHARTIARTL", "NIFTY") || "").trim().toUpperCase();
-  if (!index) return;
-  const action = confirm("OK = LONG (buy call), Cancel = SHORT (buy put)") ? "LONG" : "SHORT";
-  await post("/ai/test-idea", { index, action });
+$("gen-ideas").addEventListener("click", (e) => withBusy(e.target, async () => {
+  await Promise.allSettled([post("/ai/ideas/refresh"), post("/ai/stock-ideas/refresh")]);
   await refreshAll();
 }));
-$("gen-stocks").addEventListener("click", (e) => withBusy(e.target, async () => { await post("/ai/stock-ideas/refresh"); await refreshAll(); }));
-$("gen-ideas").addEventListener("click", (e) => withBusy(e.target, async () => { await post("/ai/ideas/refresh"); await refreshAll(); }));
 $("gen-brief").addEventListener("click", (e) => withBusy(e.target, async () => { await post("/ai/brief/refresh"); await loadBrief(true); refreshAll(); }));
 
 // ---------------------------------------------------------------- main loop
@@ -547,7 +536,6 @@ async function refreshAll() {
     const s = d.status;
     $("mode").textContent = s.mode;
     $("mode").classList.toggle("live", s.mode === "LIVE");
-    $("test-idea").hidden = s.mode !== "PAPER";
     const kite = $("kite");
     $("kite-logout").hidden = !s.kiteLoggedIn;
     if (s.kiteLoggedIn) kite.textContent = "Kite ✓";
@@ -557,8 +545,7 @@ async function refreshAll() {
     $("updated").textContent = "updated " + timeOf(s.now);
 
     renderTiles(d.indices);
-    renderIdeas(d.ai);
-    renderStockIdeas(d.ai);
+    renderDesk(d.ai.desk);
     renderRisky(d.ai);
     renderTrader(d.ai.trader, s.mode);
     renderHoldings(d.portfolio);
@@ -574,9 +561,8 @@ async function refreshAll() {
 async function boot() {
   if (!token) { askToken(); return; }
   await loadCharts();
-  await Promise.all([refreshAll(), loadGlobal(), loadBrief()]);
+  await Promise.all([refreshAll(), loadBrief()]);
 }
 boot();
 setInterval(refreshAll, 10_000);
-setInterval(loadGlobal, 60_000);
 setInterval(() => loadCharts().then(refreshAll), 60_000);

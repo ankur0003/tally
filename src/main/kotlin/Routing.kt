@@ -32,9 +32,6 @@ import java.time.LocalDate
 import java.util.UUID
 
 @Serializable
-data class KillSwitchRequest(val on: Boolean, val reason: String = "Manual")
-
-@Serializable
 data class StrategyUpdate(val enabled: Boolean? = null, val autoTrade: Boolean? = null, val confirmLive: Boolean = false)
 
 @Serializable
@@ -65,6 +62,9 @@ data class TakeTradeRequest(
     /** Taken from the High-risk section: confidence bar ignored, sized with the high-risk max loss. */
     val highRisk: Boolean = false,
 )
+
+@Serializable
+data class AiTraderConfigRequest(val enabled: Boolean, val fund: Double, val confirmLive: Boolean = false)
 
 @Serializable
 data class TradeRef(val ideaId: String? = null)
@@ -195,8 +195,9 @@ fun Application.configureRouting(s: Services) {
                 call.respond(HttpStatusCode.NoContent)
             }
             post("/squareoff") {
-                // Panic button: block new entries, then flatten everything.
-                s.risk.setKillSwitch(true, "Manual square-off")
+                // Panic button: stop the AI from opening anything new, then flatten everything.
+                s.aiTrader.setAutoTrade(false)
+                s.aiDesk.status().let { s.aiDesk.configure(false, it.fund) }
                 call.respond(s.orders.squareOff("api:squareoff"))
             }
 
@@ -234,11 +235,6 @@ fun Application.configureRouting(s: Services) {
 
             // ---- Risk
             get("/risk") { call.respond(s.risk.status(s.broker.positions(), s.broker.orders().size)) }
-            post("/risk/kill-switch") {
-                val req = call.receive<KillSwitchRequest>()
-                s.risk.setKillSwitch(req.on, req.reason)
-                call.respond(s.risk.status(s.broker.positions(), s.broker.orders().size))
-            }
 
             // ---- Strategies
             get("/strategies") { call.respond(s.runner.status()) }
@@ -352,6 +348,22 @@ fun Application.configureRouting(s: Services) {
             post("/ai/pending/cancel") {
                 val ref = runCatching { call.receive<TradeRef>() }.getOrDefault(TradeRef())
                 s.aiTrader.cancelPending(ref.ideaId); call.respond(s.aiTrader.status())
+            }
+            get("/ai/desk") { call.respond(s.aiDesk.status()) }
+            put("/ai/desk") {
+                val req = call.receive<AiTraderConfigRequest>()
+                if (req.enabled && s.config.mode == TradingMode.LIVE && !req.confirmLive) {
+                    throw IllegalArgumentException("The AI trader places real orders in LIVE mode; resend with \"confirmLive\": true")
+                }
+                call.respond(s.aiDesk.configure(req.enabled, req.fund))
+            }
+            // Runs the fund-manager decision now on the open ideas (only when the AI trader is on).
+            post("/ai/desk/run") {
+                val run = s.aiDesk.decide()
+                call.respond(buildJsonObject {
+                    put("run", run?.let { TallyJson.encodeToJsonElement(DeskRun.serializer(), it) } ?: JsonNull)
+                    put("status", TallyJson.encodeToJsonElement(AiTraderDeskStatus.serializer(), s.aiDesk.status()))
+                })
             }
             get("/ai/settings") { call.respond(s.tradeSettings.current) }
             put("/ai/settings") { call.respond(s.tradeSettings.update(call.receive<TradeSettings>())) }
@@ -474,6 +486,7 @@ private suspend fun dashboard(s: Services): JsonObject {
             put("ideas", TallyJson.encodeToJsonElement(ListSerializer(TradeIdea.serializer()), ideas))
             put("stats", TallyJson.encodeToJsonElement(ListSerializer(BucketStats.serializer()), s.ideas.stats()))
             put("trader", TallyJson.encodeToJsonElement(AiTraderStatus.serializer(), trader))
+            put("desk", TallyJson.encodeToJsonElement(AiTraderDeskStatus.serializer(), s.aiDesk.status()))
             put("mood", TallyJson.encodeToJsonElement(BotMood.serializer(), mood))
             put("plans", if (loggedIn) TallyJson.encodeToJsonElement(MapSerializer(String.serializer(), OptionPlan.serializer()), s.aiTrader.plans(liveIdeas(s, ideas) + liveIdeas(s, ideas, highRisk = true))) else JsonNull)
         })

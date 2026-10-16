@@ -26,10 +26,12 @@ class ServerTest {
         configure()
         val page = client.get("/")
         assertEquals(HttpStatusCode.OK, page.status)
-        assertTrue(page.bodyAsText().contains("AI trade ideas"))
+        assertTrue(page.bodyAsText().contains("AI trader"))
         assertEquals(HttpStatusCode.OK, client.get("/app.js").status)
         assertEquals(HttpStatusCode.Forbidden, client.get("/api/dashboard").status)
         assertEquals(HttpStatusCode.Forbidden, client.post("/api/ai/autotrade").status)
+        assertEquals(HttpStatusCode.Forbidden, client.put("/api/ai/desk").status)
+        assertEquals(HttpStatusCode.Forbidden, client.post("/api/ai/desk/run").status)
     }
 
     @Test

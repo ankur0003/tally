@@ -40,7 +40,7 @@ data class AiTrade(
     val stopOrderId: String?,
     val openedAt: String,
     val expiresAt: String,
-    /** "auto" or "manual" (Take trade button). */
+    /** "auto", "manual" (Take trade button), "high-risk" or "ai-trader" (autonomous AI trader). */
     val source: String = "auto",
     /** Highest premium seen while open; drives the trailing stop. */
     val peakPrice: Double = 0.0,
@@ -71,6 +71,9 @@ data class PendingTrade(
     val lots: Int? = null,
     val targetMultiple: Double? = null,
     val source: String,
+    /** AI trader only: loss cap and money for this trade, decided by the fund-manager call. */
+    val maxLoss: Double? = null,
+    val capital: Double? = null,
 )
 
 @Serializable
@@ -188,6 +191,25 @@ class AiTrader(
         msg
     }
 
+    /**
+     * AI trader entry: the confidence bar is ignored (the fund-manager call made the decision), but every other
+     * rule still applies: rule-checked levels, slots, one trade per underlying, daily loss limit, profit goal.
+     */
+    suspend fun aiTraderTake(ideaId: String, maxLoss: Double, capital: Double): String = mutex.withLock {
+        rollDay()
+        val idea = tracker.get(ideaId) ?: throw IllegalArgumentException("Unknown idea $ideaId")
+        require(maxLoss > 0 && capital > 0) { "AI trader needs a positive loss cap and capital" }
+        val msg = arm(idea, null, null, AI_TRADER, clock.now(), maxLoss, capital)
+        save()
+        msg
+    }
+
+    /** Premium tied up in AI-trader trades that are open, plus the money reserved by ones waiting for entry. */
+    suspend fun aiTraderFundInUse(): Double = mutex.withLock {
+        state.opens.filter { it.source == AI_TRADER }.sumOf { it.investment } +
+            state.pendings.filter { it.source == AI_TRADER }.sumOf { it.capital ?: 0.0 }
+    }
+
     /** Cancels one waiting trade, or all of them when [ideaId] is null. */
     suspend fun cancelPending(ideaId: String? = null) = mutex.withLock {
         state.pendings.filter { ideaId == null || it.ideaId == ideaId }.forEach {
@@ -293,14 +315,17 @@ class AiTrader(
 
     // ---------------------------------------------------------------- entry
 
-    private suspend fun arm(idea: TradeIdea, lots: Int?, targetMultiple: Double?, source: String, now: ZonedDateTime): String {
+    private suspend fun arm(
+        idea: TradeIdea, lots: Int?, targetMultiple: Double?, source: String, now: ZonedDateTime,
+        maxLoss: Double? = null, capital: Double? = null,
+    ): String {
         if (slotsLeft() < 1) error("Already ${settings.current.maxOpenTrades} AI trades open or waiting (the max). Close one or raise the limit in Trade settings.")
         if (busyUnderlying(idea.index)) error("There is already a ${idea.index} trade open or waiting")
         if (idea.action != "LONG" && idea.action != "SHORT") error("This idea is NO TRADE")
         if (idea.status != "OPEN") error("This idea is already resolved (${idea.status})")
         if (!idea.levelsOk) error("This idea failed the rule checks: ${idea.note}")
         // Paper test ideas are exempt so the pipeline can be exercised; everything else must clear the bar.
-        if (isHighRisk(idea) && source != HIGH_RISK) {
+        if (isHighRisk(idea) && source != HIGH_RISK && source != AI_TRADER) {
             error("Confidence ${idea.confidence}% is below the ${cfg.minConfidence}% minimum; use the High-risk section to take it")
         }
         if (!clock.isOpen(now)) error("Market is closed")
@@ -315,7 +340,7 @@ class AiTrader(
         val pending = PendingTrade(
             ideaId = idea.id, index = idea.index, action = idea.action, quoteKey = idea.quoteKey,
             indexEntry = idea.entry, indexStop = idea.stopLoss, armedAt = now.toString(), expiresAt = expires.toString(),
-            lots = lots, targetMultiple = targetMultiple, source = source,
+            lots = lots, targetMultiple = targetMultiple, source = source, maxLoss = maxLoss, capital = capital,
         )
         val spot = market.ltp(idea.quoteKey)
         if (nearEntry(spot, idea.entry)) {
@@ -343,8 +368,8 @@ class AiTrader(
     }
 
     private suspend fun enter(p: PendingTrade, idea: TradeIdea, now: ZonedDateTime): AiTrade? {
-        val maxLoss = if (p.source == HIGH_RISK) settings.current.highRiskMaxLoss else null
-        val plan = runCatching { planner.plan(idea, riskBudgetForNew(), p.targetMultiple, maxLoss) }
+        val maxLoss = p.maxLoss ?: if (p.source == HIGH_RISK) settings.current.highRiskMaxLoss else null
+        val plan = runCatching { planner.plan(idea, riskBudgetForNew(), p.targetMultiple, maxLoss, p.capital) }
             .getOrElse { note("No option plan for ${idea.index}: ${it.message}"); return null }
         if (!plan.executable) { note("Skipped ${plan.symbol}: ${plan.reason}"); return null }
         val lots = min(p.lots ?: plan.lots, plan.lots)
@@ -464,6 +489,8 @@ class AiTrader(
         private val LAST_ENTRY: LocalTime = LocalTime.of(14, 45)
         /** Trade source for manual trades taken from the High-risk section (never auto-traded). */
         const val HIGH_RISK = "high-risk"
+        /** Trade source for the autonomous AI trader (fund-capped, decided by [AiTraderDesk]). */
+        const val AI_TRADER = "ai-trader"
         /** Index within 0.1% of the idea's entry counts as "at entry". */
         private const val ENTRY_TOLERANCE = 0.001
         /** SL limit price this far below the trigger so a fast-falling option still fills. */

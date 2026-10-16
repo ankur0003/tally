@@ -30,10 +30,10 @@ tally:
 
   risk:
     killSwitch: false
-    maxDailyLoss: 1500           # INR, whole account. New entries blocked once day P&L <= -maxDailyLoss
-    maxOrderValue: 25000         # INR notional per order (premium value for options)
+    maxDailyLoss: 10000           # INR, whole account. New entries blocked once day P&L <= -maxDailyLoss
+    maxOrderValue: 50000         # INR notional per order (premium value for options)
     maxOpenPositions: 5
-    maxOrdersPerDay: 40
+    maxOrdersPerDay: 20
     intradayEntryCutoff: "15:00" # IST, no new MIS/intraday entries after this
     intradaySquareOff: "15:15"   # IST, runner flattens intraday positions after this
     allowedExchanges: [ "NSE", "BSE", "NFO" ]
@@ -85,7 +85,7 @@ tally:
         execution: "INDEX_OPTIONS"
         optionsUnderlying: "BANKNIFTY"
         lots: 1
-        stopLossPct: 25
+        stopLossPct: 15
         targetPct: 50
         autoTrade: false
         enabled: true

@@ -73,7 +73,10 @@ class OptionPlanner(
     private val tracker: IdeaTracker,
     private val maxOrderValue: Double,
 ) {
-    suspend fun plan(idea: TradeIdea, lossBudgetLeft: Double, targetMultipleOverride: Double? = null, maxLossOverride: Double? = null): OptionPlan {
+    suspend fun plan(
+        idea: TradeIdea, lossBudgetLeft: Double, targetMultipleOverride: Double? = null, maxLossOverride: Double? = null,
+        capitalOverride: Double? = null,
+    ): OptionPlan {
         require(idea.action == "LONG" || idea.action == "SHORT") { "Idea ${idea.id} is not directional" }
         val type = if (idea.action == "LONG") OptionType.CE else OptionType.PE
         val spot = market.ltp(idea.quoteKey)
@@ -86,7 +89,7 @@ class OptionPlanner(
         val s = settings.current
         val multiple = targetMultipleOverride ?: if (s.targetMode == "MULTIPLE") s.targetMultiple else null
         val levels = levels(premium, abs(idea.entry - idea.stopLoss), abs(idea.target - idea.entry), s.maxStopPct, multiple)
-        val sizing = size(premium, levels.stop, opt.lotSize, s.capital, min(maxLossOverride ?: s.maxLossPerTrade, lossBudgetLeft), maxOrderValue)
+        val sizing = size(premium, levels.stop, opt.lotSize, capitalOverride ?: s.capital, min(maxLossOverride ?: s.maxLossPerTrade, lossBudgetLeft), maxOrderValue)
             .let { z ->
                 // Illiquid strikes: a market order would give away the edge in the spread alone.
                 when {

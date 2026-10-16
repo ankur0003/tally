@@ -103,9 +103,6 @@ h3 { margin: 0 0 8px; }
 .tile .hair { stroke: var(--muted); stroke-width: 1; }
 .tile .dot { fill: var(--accent); stroke: var(--surface); stroke-width: 2; }
 
-.global { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 2px 18px; }
-.gq { display: flex; justify-content: space-between; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--grid); font-size: 13px; }
-.gq .name { color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .marketview { margin: 0 0 10px; color: var(--ink-2); }
 .idea { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
@@ -204,9 +201,25 @@ dialog menu { gap: 8px; }
 @media (prefers-reduced-motion: reduce) { .mood.danger .mood-face { animation: none; } }
 @media (max-width: 960px) { .mood { position: static; } }
 
+/* top row: tally says + positions today */
+.top-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+.top-row .mood { position: static; }
+@media (max-width: 720px) { .top-row { grid-template-columns: 1fr; } }
+
 /* High risk section */
 .card.risky { border-color: var(--down); }
 .card.risky .banner { margin: 0 0 10px; }
 .verdict { margin: 6px 0 0; font-size: 13px; }
 .row-end { display: flex; justify-content: flex-end; margin: 4px 0 8px; }
 .idea.hr { border-color: var(--down); background: var(--down-wash); }
+
+/* AI trader */
+.card.desk { border-color: var(--accent); }
+.desk-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; margin-bottom: 6px; }
+.desk-form label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--ink-2); }
+.desk-form input { font: inherit; font-size: 13px; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--page); color: var(--ink); width: 160px; }
+.stance { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 4px; }
+.stance.LONG { background: var(--up-wash); color: var(--up); }
+.stance.SHORT { background: var(--down-wash); color: var(--down); }
+.stance.NEUTRAL { background: var(--hl-wash); color: var(--ink-2); }
+.sub-head { font-size: 13px; font-weight: 600; margin: 14px 0 6px; color: var(--ink-2); }

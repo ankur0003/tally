@@ -12,6 +12,7 @@ import java.time.ZonedDateTime
  * Background loops:
  *  - every 15s: manage the open AI trade (stop / target / expiry / EOD)
  *  - every 60s: score open ideas; run the news brief and idea generation when due and within budget
+ *  - after each idea run: the AI trader's fund-manager decision, when it is switched on
  * Briefs run 08:30-15:30 IST on weekdays; ideas only while the market is open, 09:25-14:45.
  */
 class AiScheduler(
@@ -20,6 +21,7 @@ class AiScheduler(
     private val intel: MarketIntel,
     private val tracker: IdeaTracker,
     private val trader: AiTrader,
+    private val desk: AiTraderDesk,
     private val clock: MarketClock,
     private val kiteReady: () -> Boolean,
 ) {
@@ -59,6 +61,7 @@ class AiScheduler(
         lastIdeasAt = clock.now()
         val run = intel.generateIdeas()
         trader.onIdeas(run.ideaIds)
+        guard("AI trader") { desk.decide() }
         return run
     }
 
@@ -66,6 +69,7 @@ class AiScheduler(
         lastStockIdeasAt = clock.now()
         val run = intel.generateStockIdeas()
         trader.onIdeas(run.ideaIds)
+        guard("AI trader") { desk.decide() }
         return run
     }
 

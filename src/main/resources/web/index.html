@@ -18,72 +18,53 @@
   <span id="spend" class="chip" title="Claude API spend today vs daily budget">AI $–</span>
   <div class="spacer"></div>
   <span id="updated" class="muted small"></span>
-  <button id="kill" class="btn ghost" title="Block new entries (exits still allowed)">Kill switch</button>
-  <button id="squareoff" class="btn danger" title="Engage kill switch and exit every open position">Square off all</button>
+  <button id="squareoff" class="btn danger" title="Switch off the AI trader and exit every open position">Square off all</button>
 </header>
 
 <main class="layout">
   <section class="main">
+    <div class="top-row">
+      <div id="mood" class="mood calm" aria-live="polite">
+        <span class="mood-face" id="mood-face">🙂</span>
+        <div><div class="mood-label">tally says</div><p id="mood-text">Warming up…</p></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>Positions today</h2></div>
+        <div id="positions"></div>
+      </div>
+    </div>
+
     <div id="tiles" class="tiles"></div>
 
-    <div class="card">
+    <div class="card desk">
       <div class="card-head">
-        <h2>Global markets</h2>
-        <span class="muted small">Yahoo Finance, may be delayed</span>
-      </div>
-      <div id="global" class="global"></div>
-    </div>
-
-    <div class="card">
-      <div class="card-head">
-        <h2>AI trade ideas</h2>
-        <span id="minconf" class="muted small"></span>
+        <h2>AI trader</h2>
+        <span id="trader-limits" class="muted small"></span>
         <div class="spacer"></div>
-        <button id="test-idea" class="btn" hidden title="PAPER only: create a test idea at the current NIFTY price">Paper test idea</button>
-        <button id="gen-ideas" class="btn">Analyze now</button>
+        <label class="switch"><input type="checkbox" id="desk-on"><span>Let AI trade</span></label>
       </div>
-      <p id="marketview" class="marketview"></p>
-      <div id="ideas"></div>
-      <details class="track">
-        <summary>Track record: how often ideas actually hit target</summary>
-        <div id="stats"></div>
-        <p class="muted small">Every directional idea is scored against real index prices: target before stop within its horizon counts as a hit. Use the 80-89 and 90+ rows to judge whether the AI's confidence deserves your money.</p>
-      </details>
-    </div>
-
-    <div class="card">
-      <div class="card-head">
-        <h2>Stock options (F&amp;O)</h2>
-        <span id="stock-sub" class="muted small"></span>
-        <div class="spacer"></div>
-        <button id="gen-stocks" class="btn">Scan now</button>
-      </div>
-      <p id="stock-view" class="marketview"></p>
-      <div id="stock-ideas"></div>
-      <details class="track" id="stock-watch-wrap">
-        <summary id="stock-watch-sum">Below the confidence bar: watch only</summary>
-        <div id="stock-watch"></div>
-      </details>
+      <form id="desk-form" class="desk-form">
+        <label>Max fund the AI may use (₹)<input id="desk-fund" type="number" min="0" step="1000" required></label>
+        <button class="btn" type="submit">Save fund</button>
+        <button class="btn" type="button" id="desk-run" title="Run the fund-manager decision now on the open ideas">Decide now</button>
+        <span id="desk-msg" class="muted small"></span>
+      </form>
+      <p class="muted small">After every analysis (index every 15 min, stocks every 30 min) the AI fund manager reads the charts (5-min to 1-year), the news brief, global markets, today's results and its own track record, then picks which ideas to trade and how big. Your limits still apply: max loss per trade, max loss per day, daily profit goal and max open trades (Trade settings). Every trade has a broker stop-loss and closes by 15:15.</p>
+      <div id="desk"></div>
+      <h3 class="sub-head">All AI trades today</h3>
+      <div id="trader"></div>
     </div>
 
     <div class="card risky">
       <div class="card-head">
         <h2>High risk · high reward</h2>
         <span class="tag miss">manual only</span>
-        <span class="muted small">below the confidence bar · never auto-traded</span>
+        <span class="muted small">below the confidence bar</span>
+        <div class="spacer"></div>
+        <button id="gen-ideas" class="btn" title="Run the index and stock analysis now">Scan now</button>
       </div>
       <p class="banner">Speculative punts. The confidence filter is ignored here, so expect to lose more often. Each trade is sized to your separate high-risk max loss (Trade settings). Daily loss limit still applies.</p>
       <div id="risky-ideas"></div>
-    </div>
-
-    <div class="card">
-      <div class="card-head">
-        <h2>Auto-trader</h2>
-        <span id="trader-limits" class="muted small"></span>
-        <div class="spacer"></div>
-        <label class="switch"><input type="checkbox" id="autotrade"><span>Auto-trade</span></label>
-      </div>
-      <div id="trader"></div>
     </div>
 
     <div class="card">
@@ -126,14 +107,6 @@
       <div class="card-head"><h2>Holdings</h2></div>
       <div id="holdings-total" class="holdings-total"></div>
       <div id="holdings"></div>
-    </div>
-    <div id="mood" class="mood calm" aria-live="polite">
-      <span class="mood-face" id="mood-face">🙂</span>
-      <div><div class="mood-label">tally says</div><p id="mood-text">Warming up…</p></div>
-    </div>
-    <div class="card">
-      <div class="card-head"><h2>Positions today</h2></div>
-      <div id="positions"></div>
     </div>
     <div class="card">
       <div class="card-head"><h2>Risk</h2></div>

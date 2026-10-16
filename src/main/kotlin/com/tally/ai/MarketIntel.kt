@@ -344,10 +344,14 @@ class MarketIntel(
         }
     }
 
+    /** Live + historical picture of one underlying (index or NSE stock key), as sent to Claude. */
+    suspend fun snapshot(key: String): JsonObject = indexSnapshot(key, clock.now())
+
     private suspend fun indexSnapshot(key: String, now: ZonedDateTime): JsonObject {
         val (exchange, symbol) = key.split(":", limit = 2)
         val intraday = market.candles(exchange, symbol, "5minute", 5)
-        val daily = market.candles(exchange, symbol, "day", 90)
+        // A year of daily bars: long-term trend and 52-week extremes, not just the last few weeks.
+        val daily = market.candles(exchange, symbol, "day", 365)
         val ltp = market.ltp(key)
         val close5 = intraday.map { it.close }
         val today = intraday.filter { KiteClient.parseCandleTime(it.time).toLocalDate() == now.toLocalDate() }
@@ -363,6 +367,15 @@ class MarketIntel(
             put("ema50_daily", last(Indicators.ema(dClose, 50)))
             put("rsi14_daily", last(Indicators.rsi(dClose, 14)))
             put("atr14_daily", last(Indicators.atr(daily.map { it.high }, daily.map { it.low }, dClose, 14)))
+            put("ema200_daily", last(Indicators.ema(dClose, 200)))
+            if (daily.isNotEmpty()) {
+                put("high52w", daily.maxOf { it.high })
+                put("low52w", daily.minOf { it.low })
+            }
+            fun ret(bars: Int) = dClose.getOrNull(dClose.size - 1 - bars)?.takeIf { it > 0 }?.let { round2((ltp - it) / it * 100) }
+            ret(5)?.let { put("return5dPct", it) }
+            ret(20)?.let { put("return20dPct", it) }
+            ret(60)?.let { put("return60dPct", it) }
             prevDay?.let { putJsonObject("prevDay") { put("high", it.high); put("low", it.low); put("close", it.close) } }
             if (today.isNotEmpty()) {
                 putJsonObject("today") {

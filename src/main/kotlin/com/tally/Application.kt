@@ -63,7 +63,8 @@ class Services(val config: AppConfig) {
     val tradeSettings = TradeSettingsStore(config.ai, config.dataDir)
     val planner = OptionPlanner(instruments, market, tradeSettings, ideas, config.risk.maxOrderValue)
     val aiTrader = AiTrader(config.ai, config.risk, orders, market, ideas, planner, tradeSettings, clock, config.dataDir)
-    val aiScheduler = AiScheduler(config.ai, claude, intel, ideas, aiTrader, clock, kiteReady = { kite.isLoggedIn })
+    val aiDesk = AiTraderDesk(claude, config.ai, intel, ideas, aiTrader, tradeSettings, global, clock, config.mode == TradingMode.LIVE, config.dataDir)
+    val aiScheduler = AiScheduler(config.ai, claude, intel, ideas, aiTrader, aiDesk, clock, kiteReady = { kite.isLoggedIn })
 }
 
 fun Application.module() {
