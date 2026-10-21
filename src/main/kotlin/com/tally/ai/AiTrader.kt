@@ -137,6 +137,9 @@ class AiTrader(
     // Separate state per mode: paper P&L must never count toward live loss limits or the profit goal.
     private val file = dataDir.resolve(if (orders.broker.mode == TradingMode.LIVE) "ai_trader_live.json" else "ai_trader.json")
     private val mutex = Mutex()
+    /** Trade lifecycle hooks for the [TradeJournal]; must not block (they run under the trader's lock). */
+    var onOpened: (AiTrade, TradeIdea) -> Unit = { _, _ -> }
+    var onClosed: (AiTrade) -> Unit = {}
     private val state: AiTraderState = (runCatching {
         if (Files.exists(file)) TallyJson.decodeFromString(AiTraderState.serializer(), Files.readString(file)) else null
     }.getOrNull() ?: AiTraderState(LocalDate.now(IST).toString(), cfg.autoTrade)).also { s ->
@@ -397,6 +400,7 @@ class AiTrader(
             }, source = p.source,
         )
         state.opens += trade
+        onOpened(trade, idea)
         if (p.source == "auto") tracker.markAutoTraded(idea.id)
         note("BUY ${plan.symbol} x$qty ($lots lot) @ %.2f = ₹%,.0f, stop %.2f (risk ₹%,.0f), target %.2f (%.2fx) [${p.source}, idea ${idea.id} ${idea.confidence}%%]"
             .format(fill, trade.investment, stop, trade.riskRupees, target, target / fill))
@@ -435,6 +439,7 @@ class AiTrader(
         state.closed += closed
         state.realizedPnl += pnl
         state.opens.removeAll { it.entryOrderId == t.entryOrderId }
+        onClosed(closed)
         note("SELL ${t.symbol} @ %.2f (%s) P&L ₹%,.2f (%.2fx), day ₹%,.2f".format(exitPrice, reason, pnl, exitPrice / t.entryPrice, state.realizedPnl))
         if (lossBudgetLeft() < 1) note("Daily loss limit reached; no new trades until tomorrow")
         if (profitGoalReached()) note("Daily profit goal reached; done for today")

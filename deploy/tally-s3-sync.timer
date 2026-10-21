@@ -1,0 +1,11 @@
+[Unit]
+Description=Back up tally data to S3 every 15 minutes, and after the end-of-day review
+
+[Timer]
+OnCalendar=*:0/15
+# 15:45 IST = 10:15 UTC (the server runs on UTC): catches the 15:20 day review.
+OnCalendar=*-*-* 10:15:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

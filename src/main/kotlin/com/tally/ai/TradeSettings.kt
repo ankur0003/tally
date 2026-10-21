@@ -48,9 +48,10 @@ data class TradeSettings(
     }
 }
 
-class TradeSettingsStore(defaults: AiConfig, dataDir: Path) {
+class TradeSettingsStore(defaults: AiConfig, dataDir: Path, live: Boolean = true) {
     private val log = LoggerFactory.getLogger(TradeSettingsStore::class.java)
-    private val file = dataDir.resolve("ai_settings.json")
+    // Separate per mode, so sizing a big paper fund never carries over to real money.
+    private val file = dataDir.resolve(if (live) "ai_settings.json" else "ai_settings_paper.json")
 
     @Volatile var current: TradeSettings = runCatching {
         if (Files.exists(file)) TallyJson.decodeFromString(TradeSettings.serializer(), Files.readString(file)).validated() else null

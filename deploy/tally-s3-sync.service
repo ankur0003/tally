@@ -1,0 +1,11 @@
+[Unit]
+Description=Back up tally data (journal, playbook, ideas, audit) to S3
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/tally/s3.env
+Environment=TALLY_DATA_DIR=/var/lib/tally
+ExecStart=/opt/tally/s3-sync.sh
+Nice=10

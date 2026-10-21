@@ -364,10 +364,12 @@ function renderDesk(d) {
   const sw = $("desk-on");
   if (document.activeElement !== sw) sw.checked = d.enabled;
   if (!deskFundDirty && document.activeElement !== $("desk-fund")) $("desk-fund").value = d.fund || "";
+  if (!deskFundDirty && document.activeElement !== $("desk-target")) $("desk-target").value = d.target || "";
   const kv = (k, v, c = "") => el("div", { class: "kv" }, el("span", { text: k }), el("span", { class: "num " + c, text: v }));
   const parts = [
     d.enabled ? null : el("div", { class: "empty", text: "AI trader is off. Set a fund and switch on “Let AI trade”." }),
     kv("Fund", `${rupees(d.fund, 0)} · in use ${rupees(d.fundInUse, 0)} · free ${rupees(d.fundFree, 0)}`),
+    d.target > 0 ? kv("Target by close", rupees(d.target, 0)) : null,
   ];
   const last = d.runs[0];
   if (last) {
@@ -399,16 +401,45 @@ function renderDesk(d) {
 
 async function saveDesk(enabled) {
   const fund = parseFloat($("desk-fund").value) || 0;
+  const target = parseFloat($("desk-target").value) || 0;
   const live = $("mode").textContent === "LIVE";
   if (enabled && !confirm(live
     ? `LIVE: the AI will place REAL orders on its own, using up to ${rupees(fund, 0)} of premium at a time, within your loss limits. Continue?`
     : `PAPER: let the AI trade on its own with up to ${rupees(fund, 0)} (simulated)?`)) return false;
-  await put("/ai/desk", { enabled, fund, confirmLive: live });
+  await put("/ai/desk", { enabled, fund, target, confirmLive: live });
   deskFundDirty = false;
   $("desk-msg").textContent = "Saved " + new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
   return true;
 }
 $("desk-fund").addEventListener("input", () => { deskFundDirty = true; });
+$("desk-target").addEventListener("input", () => { deskFundDirty = true; });
+
+const VERDICT = { GOOD_WIN: "right call, won", GOOD_LOSS: "right call, unlucky", BAD_WIN: "lucky win", BAD_LOSS: "mistake" };
+function renderJournal(j) {
+  if (!j) return;
+  const pb = j.playbook;
+  $("journal-sum").textContent = `today ${j.winsToday}W / ${j.lossesToday}L · ${rupees(j.pnlToday, 0)} · playbook v${pb.version}, ${pb.tradesReviewed} trades reviewed`;
+  const parts = [];
+  parts.push(pb.rules.length
+    ? el("ol", { class: "log" }, ...pb.rules.map((r) => el("li", { text: r })))
+    : el("div", { class: "empty", text: "No playbook yet: it is written after the first reviewed trade or day." }));
+  if (j.today.length) {
+    parts.push(el("h3", { class: "sub-head", text: "Today's trades and reviews" }));
+    j.today.forEach((t) => parts.push(el("div", { class: "idea" },
+      el("div", { class: "row" },
+        el("span", { class: "act " + (t.action === "LONG" ? "up" : "down"), text: `${t.underlying} ${t.action}` }),
+        el("span", { class: "muted small", text: `${t.symbol} ×${t.quantity} @ ${inr(t.entryPrice)} · ${t.confidence}% · ${t.source}` }),
+        el("span", { class: "spacer" }),
+        el("span", { class: "num " + cls(t.pnl), text: t.pnl == null ? "open" : rupees(t.pnl, 0) }),
+      ),
+      t.exitReason ? el("p", { class: "inv", text: `${timeOf(t.openedAt)} → ${timeOf(t.closedAt)} · ${t.exitReason}` }) : null,
+      t.review ? el("p", { class: "verdict" }, el("strong", { text: (VERDICT[t.review.verdict] || t.review.verdict) + ": " }), t.review.lesson) : null,
+      t.review && t.review.mistakes.length ? el("p", { class: "inv", text: "Went wrong: " + t.review.mistakes.join(" · ") }) : null,
+      t.pnl != null && !t.review ? el("p", { class: "muted small", text: "Review pending…" }) : null,
+    )));
+  }
+  $("journal").replaceChildren(...parts);
+}
 $("desk-on").addEventListener("change", async (e) => {
   try { if (!(await saveDesk(e.target.checked))) e.target.checked = false; } catch (err) { e.target.checked = !e.target.checked; alert(err.message); }
   refreshAll();
@@ -530,7 +561,11 @@ $("gen-brief").addEventListener("click", (e) => withBusy(e.target, async () => {
 
 // ---------------------------------------------------------------- main loop
 
+let refreshing = false;
 async function refreshAll() {
+  // Never stack polls: a slow refresh would otherwise pile up requests behind Kite's quote rate limit.
+  if (refreshing) return;
+  refreshing = true;
   try {
     const d = await api("/dashboard");
     const s = d.status;
@@ -546,6 +581,7 @@ async function refreshAll() {
 
     renderTiles(d.indices);
     renderDesk(d.ai.desk);
+    renderJournal(d.ai.journal);
     renderRisky(d.ai);
     renderTrader(d.ai.trader, s.mode);
     renderHoldings(d.portfolio);
@@ -555,6 +591,8 @@ async function refreshAll() {
     if (d.ai.briefAt && d.ai.briefAt !== shownBriefAt) loadBrief();
   } catch (e) {
     $("updated").textContent = "offline: " + e.message;
+  } finally {
+    refreshing = false;
   }
 }
 

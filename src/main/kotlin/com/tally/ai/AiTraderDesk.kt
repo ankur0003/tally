@@ -37,6 +37,8 @@ data class AiTraderDeskState(
     var enabled: Boolean = false,
     /** INR of premium the AI trader may have deployed at once. */
     var fund: Double = 0.0,
+    /** Optional goal: the fund value (INR) to reach by the close. 0 = none. */
+    var target: Double = 0.0,
     var day: String = "",
     val runs: MutableList<DeskRun> = mutableListOf(),
     /** Ideas already shown to the fund-manager call today, so the same idea is not paid for twice. */
@@ -47,6 +49,7 @@ data class AiTraderDeskState(
 data class AiTraderDeskStatus(
     val enabled: Boolean,
     val fund: Double,
+    val target: Double,
     val fundInUse: Double,
     val fundFree: Double,
     val runs: List<DeskRun>,
@@ -68,6 +71,7 @@ class AiTraderDesk(
     private val trader: AiTrader,
     private val settings: TradeSettingsStore,
     private val global: GlobalMarkets,
+    private val journal: TradeJournal,
     private val clock: MarketClock,
     live: Boolean,
     dataDir: Path,
@@ -85,15 +89,17 @@ class AiTraderDesk(
     suspend fun status(): AiTraderDeskStatus = mutex.withLock {
         rollDay()
         val inUse = trader.aiTraderFundInUse()
-        AiTraderDeskStatus(state.enabled, state.fund, inUse, (state.fund - inUse).coerceAtLeast(0.0), state.runs.toList().asReversed())
+        AiTraderDeskStatus(state.enabled, state.fund, state.target, inUse, (state.fund - inUse).coerceAtLeast(0.0), state.runs.toList().asReversed())
     }
 
-    suspend fun configure(enabled: Boolean, fund: Double): AiTraderDeskStatus {
+    suspend fun configure(enabled: Boolean, fund: Double, target: Double? = null): AiTraderDeskStatus {
         require(fund in 0.0..10_000_000.0) { "fund must be 0 - 1,00,00,000" }
+        require(target == null || target == 0.0 || target > fund) { "target must be above the fund (0 = no target)" }
         require(!enabled || fund >= MIN_FUND) { "Give the AI trader at least ₹%,.0f to work with".format(MIN_FUND) }
         mutex.withLock {
             state.enabled = enabled
             state.fund = fund
+            target?.let { state.target = it }
             save()
         }
         log.info("AI trader {} with fund ₹{}", if (enabled) "ENABLED" else "disabled", fund)
@@ -128,6 +134,8 @@ class AiTraderDesk(
         val india = runCatching { intel.indiaQuotes() }.getOrNull()
         val globalQuotes = TallyJson.encodeToJsonElement(global.snapshot())
         val stats = TallyJson.encodeToJsonElement(ListSerializer(BucketStats.serializer()), tracker.stats())
+        val recentTrades = journal.recentLines(12)
+        val recentDays = journal.recentDays()
         val context = buildJsonObject {
             put("nowIST", now.toString())
             put("lastNewEntryIST", "14:45; everything is closed by 15:15")
@@ -140,10 +148,17 @@ class AiTraderDesk(
                 put("realisedTodayINR", t.realizedPnlToday)
                 put("openPnlINR", t.openPnl)
                 put("slotsLeft", t.slotsLeft)
+                if (state.target > 0) {
+                    val value = state.fund + t.realizedPnlToday + (t.openPnl ?: 0.0)
+                    put("goal", "Grow the fund from ${r0(state.fund)} to ${r0(state.target)} by 15:15 today; it is worth about ${r0(value)} now " +
+                        "(${r0(state.target - value)} to go). A stretch goal: chase only setups that meet your playbook; forcing bad trades moves you away from it.")
+                }
                 putJsonArray("openTrades") { t.opens.forEach { add("${it.trade.index} ${it.trade.symbol} [${it.trade.source}] P&L ${it.pnl?.let(::r0)}") } }
                 putJsonArray("closedToday") { t.closedToday.forEach { add("${it.index} ${it.symbol} [${it.source}] P&L ${it.pnl?.let(::r0)} (${it.exitReason})") } }
             }
-            put("ideaTrackRecord", stats)
+            if (!cfg.learningMode) put("ideaTrackRecord", stats)
+            putJsonArray("yourRecentTradesAndLessons") { recentTrades.forEach { add(it) } }
+            putJsonArray("yourRecentDays") { recentDays.forEach { add(it) } }
             put("india", india ?: JsonNull)
             put("global", globalQuotes)
             putJsonArray("candidates") {
@@ -153,7 +168,7 @@ class AiTraderDesk(
                         put("underlying", i.index)
                         put("kind", i.kind)
                         put("action", i.action)
-                        put("analystConfidence", i.confidence)
+                        if (!cfg.learningMode) put("analystConfidence", i.confidence)
                         put("createdAtIST", i.createdAt)
                         put("entry", i.entry); put("stopLoss", i.stopLoss); put("target", i.target)
                         put("horizonMinutes", i.horizonMinutes)
@@ -174,7 +189,7 @@ class AiTraderDesk(
         val body = buildJsonObject {
             put("model", api.model)
             put("max_tokens", 16000)
-            put("system", SYSTEM)
+            put("system", if (cfg.learningMode) SYSTEM + "\n\n" + LEARNING else SYSTEM)
             putJsonObject("output_config") {
                 put("effort", "high")
                 putJsonObject("format") {
@@ -186,6 +201,8 @@ class AiTraderDesk(
         }
         val prompt = """
             $brief
+
+            ${journal.playbookPrompt()}
 
             <desk>
             $context
@@ -209,6 +226,7 @@ class AiTraderDesk(
             val idea = byId[j.str("ideaId")] ?: return@mapNotNull null
             val riskPct = j["riskPct"]!!.jsonPrimitive.int.coerceIn(25, 100)
             val maxLoss = settings.current.maxLossPerTrade * riskPct / 100
+            journal.deskReason(idea.id, j.str("reason"))
             val result = runCatching { trader.aiTraderTake(idea.id, maxLoss, free) }.getOrElse { "Not placed: ${it.message}" }
             free = state.fund - trader.aiTraderFundInUse()
             DeskPick(idea.id, idea.index, idea.action, riskPct, j.str("reason"), result)
@@ -276,6 +294,17 @@ class AiTraderDesk(
             stance is your overall call on Indian equities for the rest of today (LONG, SHORT or NEUTRAL).
             marketView: 2-3 plain sentences a client can follow. Each trade reason: one or two sentences citing data.
             passReason: one sentence on what you skipped and why.
+        """.trimIndent()
+
+        private val LEARNING = """
+            LEARNING MODE: this is a paper account run to learn. There is no analyst confidence score: judge each
+            idea yourself from the charts, the backdrop, your playbook and your own recent trades and days. Trade
+            setups you would genuinely take, and size by your own conviction; a reasonable trade at riskPct 25 that
+            teaches you something beats passing on everything. Still pass on clear playbook violations. Each trade
+            is reviewed after it closes and the lessons update your playbook.
+            Time of day: in this paper account new entries are allowed until 14:45. Any playbook rule that stops
+            entries earlier (e.g. "no new entries after 13:45") does not apply here; treat late-session timing as a
+            factor to weigh (less time for the option to pay), not a ban.
         """.trimIndent()
 
         private fun schema(ids: List<String>) = buildJsonObject {

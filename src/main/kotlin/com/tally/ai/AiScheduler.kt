@@ -13,6 +13,7 @@ import java.time.ZonedDateTime
  *  - every 15s: manage the open AI trade (stop / target / expiry / EOD)
  *  - every 60s: score open ideas; run the news brief and idea generation when due and within budget
  *  - after each idea run: the AI trader's fund-manager decision, when it is switched on
+ * After 15:20: a once-a-day debrief of all ideas and trades into the playbook ([TradeJournal.reviewDay]).
  * Briefs run 08:30-15:30 IST on weekdays; ideas only while the market is open, 09:25-14:45.
  */
 class AiScheduler(
@@ -22,6 +23,7 @@ class AiScheduler(
     private val tracker: IdeaTracker,
     private val trader: AiTrader,
     private val desk: AiTraderDesk,
+    private val journal: TradeJournal,
     private val clock: MarketClock,
     private val kiteReady: () -> Boolean,
 ) {
@@ -31,6 +33,7 @@ class AiScheduler(
         private set
     @Volatile private var lastIdeasAt: ZonedDateTime? = null
     @Volatile private var lastStockIdeasAt: ZonedDateTime? = null
+    @Volatile private var dayReviewTried = ""
 
     fun start() {
         scope.launch {
@@ -47,6 +50,7 @@ class AiScheduler(
                     guard("brief") { if (briefDue()) intel.refreshBrief(kiteReady()) }
                     guard("ideas") { if (ideasDue()) runIdeas() }
                     guard("stock ideas") { if (stockIdeasDue()) runStockIdeas() }
+                    guard("day review") { if (dayReviewDue()) journal.reviewDay(clock.now().toLocalDate().toString(), "") }
                 }
                 delay(60_000)
             }
@@ -81,6 +85,18 @@ class AiScheduler(
         if (overBudget()) return false
         val last = lastStockIdeasAt ?: intel.latestStockRun?.let { ZonedDateTime.parse(it.at) } ?: return true
         return Duration.between(last, now).toMinutes() >= cfg.stockIdeaMinutes
+    }
+
+    /** End-of-day debrief into the playbook, once per trading day after the 15:15 square-off. */
+    private fun dayReviewDue(): Boolean {
+        val now = clock.now()
+        val t = now.toLocalTime()
+        if (!clock.isTradingDay(now) || t.isBefore(LocalTime.of(15, 20)) || t.isAfter(LocalTime.of(18, 0))) return false
+        val today = now.toLocalDate().toString()
+        // Tried at most once a day, so a failing review can't burn budget every minute.
+        if (today in journal.playbook.daysReviewed || dayReviewTried == today) return false
+        dayReviewTried = today
+        return true
     }
 
     private fun briefDue(): Boolean {

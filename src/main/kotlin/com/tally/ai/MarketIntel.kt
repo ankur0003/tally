@@ -142,6 +142,15 @@ class MarketIntel(
 
     // ---------------------------------------------------------------- ideas
 
+    /** Learning mode trades more so there is more to learn from; the AI trader still filters every idea. */
+    private fun callRule() = if (cfg.learningMode)
+        "LEARNING MODE (paper money): give LONG or SHORT whenever there is a tradeable setup with a logical stop and target; " +
+            "use NO_TRADE only when there is no defined setup at all. The fund manager filters, and every trade is reviewed so you learn."
+    else "Use NO_TRADE unless the setup is genuinely strong."
+
+    /** Lessons from reviewed trades ([TradeJournal.playbookPrompt]); empty until the first review. */
+    var playbook: () -> String = { "" }
+
     suspend fun generateIdeas(): IdeaRun = ideaLock.withLock {
         val now = clock.now()
         val snapshots = AI_INDICES.mapValues { (_, key) -> indexSnapshot(key, now) }
@@ -171,12 +180,14 @@ class MarketIntel(
         val prompt = """
             $brief
 
+            ${playbook()}
+
             Live data:
             <market_data>
             $context
             </market_data>
 
-            Give one entry per index (NIFTY and BANKNIFTY). Use NO_TRADE unless the setup is genuinely strong.
+            Give one entry per index (NIFTY and BANKNIFTY). ${callRule()}
         """.trimIndent()
 
         val r = api.create(body, prompt)
@@ -265,12 +276,14 @@ class MarketIntel(
         val prompt = """
             $brief
 
+            ${playbook()}
+
             Live data for today's biggest movers among liquid F&O stocks:
             <market_data>
             $context
             </market_data>
 
-            Give one entry per stock (${shortlist.joinToString()}). Use NO_TRADE unless the setup is genuinely strong.
+            Give one entry per stock (${shortlist.joinToString()}). ${callRule()}
         """.trimIndent()
 
         val r = api.create(body, prompt)

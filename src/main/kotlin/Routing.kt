@@ -1,6 +1,8 @@
 package com.tally
 
 import com.tally.ai.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import com.tally.backtest.BacktestParams
 import com.tally.backtest.Backtester
 import com.tally.config.TradingMode
@@ -64,7 +66,10 @@ data class TakeTradeRequest(
 )
 
 @Serializable
-data class AiTraderConfigRequest(val enabled: Boolean, val fund: Double, val confirmLive: Boolean = false)
+data class AiTraderConfigRequest(val enabled: Boolean, val fund: Double, val confirmLive: Boolean = false, val target: Double? = null)
+
+@Serializable
+data class DayReviewRequest(val day: String? = null, val notes: String = "")
 
 @Serializable
 data class TradeRef(val ideaId: String? = null)
@@ -277,7 +282,7 @@ fun Application.configureRouting(s: Services) {
             }
 
             // ---- Dashboard + AI market intelligence
-            get("/dashboard") { call.respond(dashboard(s)) }
+            get("/dashboard") { call.respond(cachedDashboard(s)) }
             get("/global") { call.respond(s.global.snapshot()) }
             get("/index-chart") {
                 val index = (call.request.queryParameters["index"] ?: "NIFTY").uppercase()
@@ -355,7 +360,7 @@ fun Application.configureRouting(s: Services) {
                 if (req.enabled && s.config.mode == TradingMode.LIVE && !req.confirmLive) {
                     throw IllegalArgumentException("The AI trader places real orders in LIVE mode; resend with \"confirmLive\": true")
                 }
-                call.respond(s.aiDesk.configure(req.enabled, req.fund))
+                call.respond(s.aiDesk.configure(req.enabled, req.fund, req.target))
             }
             // Runs the fund-manager decision now on the open ideas (only when the AI trader is on).
             post("/ai/desk/run") {
@@ -364,6 +369,17 @@ fun Application.configureRouting(s: Services) {
                     put("run", run?.let { TallyJson.encodeToJsonElement(DeskRun.serializer(), it) } ?: JsonNull)
                     put("status", TallyJson.encodeToJsonElement(AiTraderDeskStatus.serializer(), s.aiDesk.status()))
                 })
+            }
+            // ---- Learning loop: trade journal, reviews and the playbook
+            get("/ai/journal") {
+                val day = call.request.queryParameters["day"]
+                if (day == null) call.respond(s.journal.status())
+                else call.respond(s.journal.day(day))
+            }
+            // Debrief a whole day (ideas + journal + optional notes on trades taken elsewhere) into the playbook.
+            post("/ai/journal/review-day") {
+                val req = runCatching { call.receive<DayReviewRequest>() }.getOrDefault(DayReviewRequest())
+                call.respond(s.journal.reviewDay(req.day ?: java.time.LocalDate.now(com.tally.util.IST).toString(), req.notes))
             }
             get("/ai/settings") { call.respond(s.tradeSettings.current) }
             put("/ai/settings") { call.respond(s.tradeSettings.update(call.receive<TradeSettings>())) }
@@ -420,6 +436,24 @@ private fun liveIdeas(s: Services, ideas: List<TradeIdea>, highRisk: Boolean = f
             created.toLocalDate() == now.toLocalDate() && now.isBefore(created.plusMinutes(it.horizonMinutes.toLong()))
     }.distinctBy { it.index }.take(if (highRisk) 6 else 10)
 }
+
+/**
+ * Kite allows one quote call per second, and the dashboard needs several (tiles, option plans). One build at a
+ * time: concurrent polls wait for the build in flight and share its result instead of queueing more quote calls.
+ */
+private val dashboardLock = Mutex()
+@Volatile private var dashboardCache: Pair<Long, JsonObject>? = null
+@Volatile private var plansCache: Pair<Long, Map<String, OptionPlan>>? = null
+
+private suspend fun cachedDashboard(s: Services): JsonObject = dashboardLock.withLock {
+    dashboardCache?.takeIf { System.currentTimeMillis() - it.first < 5_000 }?.second
+        ?: dashboard(s).also { dashboardCache = System.currentTimeMillis() to it }
+}
+
+/** Option plans cost a quote call per idea; they move slowly, so reuse them for 30 s. */
+private suspend fun cachedPlans(s: Services, ideas: List<TradeIdea>): Map<String, OptionPlan> =
+    plansCache?.takeIf { System.currentTimeMillis() - it.first < 30_000 }?.second
+        ?: s.aiTrader.plans(ideas).also { plansCache = System.currentTimeMillis() to it }
 
 private suspend fun dashboard(s: Services): JsonObject {
     val loggedIn = s.kite.isLoggedIn
@@ -487,8 +521,9 @@ private suspend fun dashboard(s: Services): JsonObject {
             put("stats", TallyJson.encodeToJsonElement(ListSerializer(BucketStats.serializer()), s.ideas.stats()))
             put("trader", TallyJson.encodeToJsonElement(AiTraderStatus.serializer(), trader))
             put("desk", TallyJson.encodeToJsonElement(AiTraderDeskStatus.serializer(), s.aiDesk.status()))
+            put("journal", TallyJson.encodeToJsonElement(JournalStatus.serializer(), s.journal.status()))
             put("mood", TallyJson.encodeToJsonElement(BotMood.serializer(), mood))
-            put("plans", if (loggedIn) TallyJson.encodeToJsonElement(MapSerializer(String.serializer(), OptionPlan.serializer()), s.aiTrader.plans(liveIdeas(s, ideas) + liveIdeas(s, ideas, highRisk = true))) else JsonNull)
+            put("plans", if (loggedIn) TallyJson.encodeToJsonElement(MapSerializer(String.serializer(), OptionPlan.serializer()), cachedPlans(s, liveIdeas(s, ideas) + liveIdeas(s, ideas, highRisk = true))) else JsonNull)
         })
     }
 }

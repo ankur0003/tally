@@ -253,3 +253,38 @@ The user kept higher values; respect that, but mention the risk where relevant.
   - Fund cap = premium in open + waiting ai-trader trades.
   - State is in `ai_desk_live.json` / `ai_desk.json`.
   - API: `GET`/`PUT /api/ai/desk` `{enabled, fund, confirmLive}`, `POST /api/ai/desk/run`.
+
+## 13. 2026-10-21: paper challenge + learning loop (deployed)
+
+- **Server switched to PAPER** (`TALLY_MODE=PAPER`) at the user's request; LIVE auto-trade was ON before that.
+  Old paper state backed up to `/var/lib/tally/backup-20261021-0542/` (plus `tally.env.bak`). To go back to LIVE,
+  set `TALLY_MODE=LIVE` and restart; LIVE keeps its own settings (`ai_settings.json`), risk limits and state.
+- Env additions: `TALLY_PAPER_CASH=5000000` (₹50L; only used when `paper_state.json` doesn't exist),
+  `TALLY_AI_BUDGET_USD=15`.
+- `tally.paper.maxOrderValue/maxDailyLoss/maxOrdersPerDay/maxOpenPositions` replace `tally.risk` in PAPER only.
+- Trade settings are now per mode: PAPER uses `ai_settings_paper.json` (capital ₹25L, maxLoss ₹1.5L/trade,
+  ₹6L/day, profit goal ₹20L, 4 open trades). AI trader desk: fund ₹50L, **target ₹70L** (new `target` field).
+- **`ai/TradeJournal.kt`**: every AI trade journaled with entry/exit market picture (`journal.json` /
+  `journal_live.json`); on close Claude reviews it (GOOD_WIN/GOOD_LOSS/BAD_WIN/BAD_LOSS, mistakes, lesson) and
+  rewrites the **playbook** (`ai_playbook.json`, ≤15 rules, shared by both modes). The playbook goes into idea
+  prompts (index + stock) and the desk prompt; the desk also sees the last 12 journal lines. EOD debrief after
+  15:20 (`AiScheduler.dayReviewDue`). API: `GET /api/ai/journal[?day=]`, `POST /api/ai/journal/review-day {day, notes}`.
+  Playbook v1 was seeded from the 2026-10-16 debrief. Dashboard has a "Learning" card.
+- `CoreLogicTest` "daily loss trips kill switch" fails since the 10-16 commit made the loss limit non-latching;
+  test not yet updated (needs the user's OK).
+- **Learning mode (PAPER only)**, enabled ~11:40 on 2026-10-21 at the user's request: `TALLY_LEARNING_MODE=true`,
+  `TALLY_IDEA_MINUTES=3`, `TALLY_STOCK_IDEA_MINUTES=3`, `TALLY_AI_BUDGET_USD=40`. Idea prompts call every setup with
+  clear levels; the desk gets no analyst confidence or bucket stats and is told small learning trades are fine.
+  `AiConfig.learningMode` is forced false in LIVE. Rule checks (levels, R:R, stop distance) still apply.
+- Day digests (`ai_days.json` / `ai_days_live.json`): saved by each day review; last 10 go to desk and review prompts.
+- **S3 backup installed 2026-10-21 16:52 IST**: bucket `tally-data-<account-id>` (ap-south-1, private, versioned,
+  SSE-S3, old versions expire after 30 days). IAM user `tally-s3-sync` with a bucket-only inline policy; its key is in
+  `/etc/tally/s3.env` (root 600). `tally-s3-sync.timer` runs `/opt/tally/s3-sync.sh` every 15 min + 15:45 IST:
+  data dir -> `s3://<bucket>/tally/` (no kite_session.json, instruments, backups), plus `daily/<date>/` copies of
+  playbook, day digests and journal. Restore on a new server: stop tally, `sudo bash -c 'set -a; . /etc/tally/s3.env;
+  /opt/tally/s3-sync.sh restore'`. Re-running `deploy/s3-setup.sh` rotates the key. The user logged in to the AWS CLI
+  as the root user for setup.
+- Paper learning mode also overrides playbook entry cutoffs earlier than 14:45 (desk `LEARNING` text) and tells
+  reviews not to write them (`TradeJournal.REVIEW_LEARNING`); the playbook itself is untouched (shared with LIVE).
+- Dashboard: `cachedDashboard` (single-flight, 5 s cache) + 30 s option-plan cache, and app.js never stacks polls;
+  Kite's 1 quote/s limit made `/api/dashboard` take 47-106 s in learning mode.

@@ -42,10 +42,10 @@ tally:
   ai:
     scheduler: true              # run briefs/ideas automatically during market hours
     briefMinutes: 120            # news + global ripple brief (web search, ~$0.55 each)
-    ideaMinutes: 15              # index trade ideas from live data + latest brief (~$0.05 each)
+    ideaMinutes: "$TALLY_IDEA_MINUTES:15"  # index trade ideas from live data + latest brief (~$0.05-0.10 each)
     minConfidence: 80            # ideas below this are shown as "watch" and can't be traded (manual or auto)
     minRewardRisk: 1.5
-    dailyBudgetUsd: 6.0          # scheduled AI calls pause for the day once spend reaches this
+    dailyBudgetUsd: "$TALLY_AI_BUDGET_USD:6.0"  # scheduled AI calls (and trade reviews) pause for the day once spend reaches this
     autoTrade: false             # start off; enable from the dashboard
     allowShort: true             # SHORT ideas are traded by buying puts (options are never sold to open)
     # First-run defaults only: after that, capital / limits / profit goal are edited on the dashboard (ai_settings.json).
@@ -53,14 +53,22 @@ tally:
     maxLossPerTrade: 250         # INR; lots are sized so the stop-loss costs at most this
     maxDailyLoss: 300            # INR; no new AI trades for the day after this much AI-trade loss
     # Stock options: every stockIdeaMinutes the day's biggest movers in this list are analysed (~$0.10 per scan).
-    stockIdeaMinutes: 30
+    stockIdeaMinutes: "$TALLY_STOCK_IDEA_MINUTES:30"
+    # PAPER only: call every setup with clear levels and let the AI trader decide without the confidence score.
+    learningMode: "$TALLY_LEARNING_MODE:false"
     stockShortlist: 6
     stocks: [ "RELIANCE", "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK", "BHARTIARTL", "INFY",
               "TCS", "LT", "ITC", "BAJFINANCE", "MARUTI", "SUNPHARMA", "HINDUNILVR", "M&M" ]
 
   paper:
-    startingCash: 500000
+    # Only used when no paper_state.json exists yet (delete it to restart the paper account).
+    startingCash: "$TALLY_PAPER_CASH:500000"
     slippageBps: 5
+    # PAPER mode only: these replace tally.risk so a large simulated fund can trade at size. LIVE always uses tally.risk.
+    maxOrderValue: 2500000
+    maxDailyLoss: 1500000
+    maxOrdersPerDay: 300
+    maxOpenPositions: 10
 
   strategies:
     pollSeconds: 30

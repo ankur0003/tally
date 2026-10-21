@@ -62,9 +62,22 @@ data class AiConfig(
     val stockIdeaMinutes: Long,
     /** How many of the day's biggest movers from [stocks] are sent to Claude per scan. */
     val stockShortlist: Int,
+    /**
+     * PAPER learning mode: analysts call every setup with clear levels instead of only strong ones, and the AI
+     * trader decides from its playbook and history without seeing the analysts' confidence. Always off in LIVE.
+     */
+    val learningMode: Boolean = false,
 )
 
-data class PaperConfig(val startingCash: Double, val slippageBps: Double)
+data class PaperConfig(
+    val startingCash: Double,
+    val slippageBps: Double,
+    /** PAPER mode only: replace these account risk limits so a large simulated fund can trade at size. Null = keep tally.risk. */
+    val maxOrderValue: Double? = null,
+    val maxDailyLoss: Double? = null,
+    val maxOrdersPerDay: Int? = null,
+    val maxOpenPositions: Int? = null,
+)
 
 data class StrategyInstanceConfig(
     val id: String,
@@ -106,8 +119,24 @@ data class AppConfig(
             val strategies = t.config("strategies")
             val dataDir = t.str("dataDir").ifBlank { Paths.get(System.getProperty("user.home"), ".tally").toString() }
 
+            val mode = TradingMode.valueOf(t.str("mode", "PAPER").uppercase())
+            val paperCfg = PaperConfig(
+                paper.str("startingCash").toDouble(), paper.str("slippageBps").toDouble(),
+                paper.str("maxOrderValue").toDoubleOrNull(), paper.str("maxDailyLoss").toDoubleOrNull(),
+                paper.str("maxOrdersPerDay").toIntOrNull(), paper.str("maxOpenPositions").toIntOrNull(),
+            )
+            val liveRisk = RiskConfig(
+                killSwitch = risk.str("killSwitch", "false").toBoolean(),
+                maxDailyLoss = risk.str("maxDailyLoss").toDouble(),
+                maxOrderValue = risk.str("maxOrderValue").toDouble(),
+                maxOpenPositions = risk.str("maxOpenPositions").toInt(),
+                maxOrdersPerDay = risk.str("maxOrdersPerDay").toInt(),
+                intradayEntryCutoff = LocalTime.parse(risk.str("intradayEntryCutoff")),
+                intradaySquareOff = LocalTime.parse(risk.str("intradaySquareOff")),
+                allowedExchanges = risk.property("allowedExchanges").getList().toSet(),
+            )
             return AppConfig(
-                mode = TradingMode.valueOf(t.str("mode", "PAPER").uppercase()),
+                mode = mode,
                 apiToken = t.str("apiToken").ifBlank { UUID.randomUUID().toString() },
                 dataDir = Paths.get(dataDir),
                 publicHost = t.str("publicHost").trim().lowercase(),
@@ -115,17 +144,13 @@ data class AppConfig(
                     KiteConfig(it.str("apiKey"), it.str("apiSecret"), it.str("baseUrl"), it.str("loginUrl"), it.str("userId").uppercase())
                 },
                 anthropic = t.config("anthropic").let { AnthropicConfig(it.str("apiKey"), it.str("model")) },
-                risk = RiskConfig(
-                    killSwitch = risk.str("killSwitch", "false").toBoolean(),
-                    maxDailyLoss = risk.str("maxDailyLoss").toDouble(),
-                    maxOrderValue = risk.str("maxOrderValue").toDouble(),
-                    maxOpenPositions = risk.str("maxOpenPositions").toInt(),
-                    maxOrdersPerDay = risk.str("maxOrdersPerDay").toInt(),
-                    intradayEntryCutoff = LocalTime.parse(risk.str("intradayEntryCutoff")),
-                    intradaySquareOff = LocalTime.parse(risk.str("intradaySquareOff")),
-                    allowedExchanges = risk.property("allowedExchanges").getList().toSet(),
+                risk = if (mode == TradingMode.LIVE) liveRisk else liveRisk.copy(
+                    maxOrderValue = paperCfg.maxOrderValue ?: liveRisk.maxOrderValue,
+                    maxDailyLoss = paperCfg.maxDailyLoss ?: liveRisk.maxDailyLoss,
+                    maxOrdersPerDay = paperCfg.maxOrdersPerDay ?: liveRisk.maxOrdersPerDay,
+                    maxOpenPositions = paperCfg.maxOpenPositions ?: liveRisk.maxOpenPositions,
                 ),
-                paper = PaperConfig(paper.str("startingCash").toDouble(), paper.str("slippageBps").toDouble()),
+                paper = paperCfg,
                 ai = t.config("ai").let { a ->
                     AiConfig(
                         scheduler = a.str("scheduler", "true").toBoolean(),
@@ -142,6 +167,7 @@ data class AppConfig(
                         stocks = a.propertyOrNull("stocks")?.getList()?.map { it.trim().uppercase() }.orEmpty(),
                         stockIdeaMinutes = a.str("stockIdeaMinutes", "30").toLong(),
                         stockShortlist = a.str("stockShortlist", "6").toInt(),
+                        learningMode = mode == TradingMode.PAPER && a.str("learningMode", "false").toBoolean(),
                     )
                 },
                 pollSeconds = strategies.str("pollSeconds", "30").toLong(),

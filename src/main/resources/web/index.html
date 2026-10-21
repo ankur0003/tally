@@ -45,6 +45,7 @@
       </div>
       <form id="desk-form" class="desk-form">
         <label>Max fund the AI may use (₹)<input id="desk-fund" type="number" min="0" step="1000" required></label>
+        <label>Target value by close (₹, 0 = none)<input id="desk-target" type="number" min="0" step="1000"></label>
         <button class="btn" type="submit">Save fund</button>
         <button class="btn" type="button" id="desk-run" title="Run the fund-manager decision now on the open ideas">Decide now</button>
         <span id="desk-msg" class="muted small"></span>
@@ -53,6 +54,15 @@
       <div id="desk"></div>
       <h3 class="sub-head">All AI trades today</h3>
       <div id="trader"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>Learning</h2>
+        <span id="journal-sum" class="muted small"></span>
+      </div>
+      <p class="muted small">Every AI trade is logged with the chart, India and global markets at entry and exit. When it closes, Claude reviews it (right call or lucky? what went wrong?) and rewrites the playbook below, which goes into every next idea and trade decision. After 15:20 the whole day is debriefed too.</p>
+      <div id="journal"></div>
     </div>
 
     <div class="card risky">
