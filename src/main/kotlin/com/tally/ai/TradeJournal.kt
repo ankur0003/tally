@@ -147,7 +147,8 @@ class TradeJournal(
 
     /** One line per recent debriefed day, oldest first: the memory that carries across days. */
     suspend fun recentDays(limit: Int = 10): List<String> = mutex.withLock {
-        days.takeLast(limit).map { "${it.day}: ${it.verdict}, ${it.trades} trades, P&L ₹%,.0f. ${it.summary} Lesson: ${it.lesson}".format(it.pnl) }
+        // Summaries contain '%' ("VIX rose 8%"), so only the P&L goes through format().
+        days.takeLast(limit).map { "${it.day}: ${it.verdict}, ${it.trades} trades, P&L ₹${"%,.0f".format(it.pnl)}. ${it.summary} Lesson: ${it.lesson}" }
     }
 
     suspend fun status(): JournalStatus = mutex.withLock {
