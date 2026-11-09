@@ -69,6 +69,7 @@ class Services(val config: AppConfig) {
         aiTrader.onClosed = j::onClosed
     }
     val aiDesk = AiTraderDesk(claude, config.ai, intel, ideas, aiTrader, tradeSettings, global, journal, clock, config.mode == TradingMode.LIVE, config.dataDir)
+        .also { intel.goalDay = it::goalDay }
     val aiScheduler = AiScheduler(config.ai, claude, intel, ideas, aiTrader, aiDesk, journal, clock, kiteReady = { kite.isLoggedIn })
 }
 

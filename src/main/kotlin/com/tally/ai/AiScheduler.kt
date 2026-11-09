@@ -43,6 +43,13 @@ class AiScheduler(
             }
         }
         scope.launch {
+            delay(30_000)
+            while (isActive) {
+                if (cfg.scheduler && api.configured) guard("position manager") { if (kiteReady()) desk.manageOpen() }
+                delay(30_000)
+            }
+        }
+        scope.launch {
             delay(20_000) // let the app finish starting
             while (isActive) {
                 guard("idea scoring") { if (kiteReady()) tracker.evaluate() }

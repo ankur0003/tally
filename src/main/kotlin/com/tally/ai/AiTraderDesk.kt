@@ -15,6 +15,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.time.LocalDate
 import java.time.ZonedDateTime
+import kotlin.math.abs
 
 @Serializable
 data class DeskPick(val ideaId: String, val underlying: String, val action: String, val riskPct: Int, val reason: String, val result: String)
@@ -150,8 +151,10 @@ class AiTraderDesk(
                 put("slotsLeft", t.slotsLeft)
                 if (state.target > 0) {
                     val value = state.fund + t.realizedPnlToday + (t.openPnl ?: 0.0)
-                    put("goal", "Grow the fund from ${r0(state.fund)} to ${r0(state.target)} by 15:15 today; it is worth about ${r0(value)} now " +
-                        "(${r0(state.target - value)} to go). A stretch goal: chase only setups that meet your playbook; forcing bad trades moves you away from it.")
+                    val left = "Grow the fund from ${r0(state.fund)} to ${r0(state.target)} by 15:15 today; it is worth about ${r0(value)} now " +
+                        "(${r0(state.target - value)} to go)."
+                    put("goal", "$left This is today's target, not a stretch goal: work actively towards it with the " +
+                        "best setups on offer (see GOAL DAY in your instructions).")
                 }
                 putJsonArray("openTrades") { t.opens.forEach { add("${it.trade.index} ${it.trade.symbol} [${it.trade.source}] P&L ${it.pnl?.let(::r0)}") } }
                 putJsonArray("closedToday") { t.closedToday.forEach { add("${it.index} ${it.symbol} [${it.source}] P&L ${it.pnl?.let(::r0)} (${it.exitReason})") } }
@@ -189,7 +192,7 @@ class AiTraderDesk(
         val body = buildJsonObject {
             put("model", api.model)
             put("max_tokens", 16000)
-            put("system", if (cfg.learningMode) SYSTEM + "\n\n" + LEARNING else SYSTEM)
+            put("system", listOfNotNull(SYSTEM, LEARNING.takeIf { cfg.learningMode }, GOAL_DAY.takeIf { state.target > 0 }).joinToString("\n\n"))
             putJsonObject("output_config") {
                 put("effort", "high")
                 putJsonObject("format") {
@@ -225,7 +228,14 @@ class AiTraderDesk(
         val picks = wanted.mapNotNull { j ->
             val idea = byId[j.str("ideaId")] ?: return@mapNotNull null
             val riskPct = j["riskPct"]!!.jsonPrimitive.int.coerceIn(25, 100)
-            val maxLoss = settings.current.maxLossPerTrade * riskPct / 100
+            val cap = settings.current.maxLossPerTrade
+            val sized = cap * riskPct / 100
+            // Goal day: a reduced riskPct (e.g. 25 after a loss) must not shut out instruments whose single lot risks
+            // more than that slice. Allow exactly one lot (plus 10% for premium drift) as long as it stays within
+            // the full per-trade cap and the day's remaining loss budget.
+            val oneLot = plans[idea.id]?.oneLotRisk
+            val maxLoss = if (state.target > 0 && oneLot != null && oneLot > sized && oneLot * 1.1 <= minOf(cap, t.lossBudgetLeft))
+                oneLot * 1.1 else sized
             journal.deskReason(idea.id, j.str("reason"))
             val result = runCatching { trader.aiTraderTake(idea.id, maxLoss, free) }.getOrElse { "Not placed: ${it.message}" }
             free = state.fund - trader.aiTraderFundInUse()
@@ -243,6 +253,79 @@ class AiTraderDesk(
         }
         log.info("AI trader: stance {} picks {}", run.stance, picks.joinToString { "${it.underlying} ${it.action} ${it.riskPct}%: ${it.result}" })
         run
+    }
+
+    /** The AI trader is on with a fund target for today: idea generators should propose setups, not wait for perfect ones. */
+    fun goalDay() = state.enabled && state.target > 0
+
+    private val lastReview = mutableMapOf<String, ZonedDateTime>()
+
+    /**
+     * Position manager: every [REVIEW_EVERY_MIN] minutes, asks Claude whether each open AI-trader trade should be
+     * held or exited now (bank a fading winner, cut a failing loser). Exits go through [AiTrader.closeNow].
+     */
+    private val manageLock = Mutex()
+
+    suspend fun manageOpen(): Unit = manageLock.withLock {
+        if (!state.enabled || !api.configured || api.spendToday().usd >= cfg.dailyBudgetUsd) return
+        val now = clock.now()
+        if (!clock.isOpen(now)) return
+        val t = trader.status()
+        val due = t.opens.filter { o ->
+            o.trade.source == "ai-trader" &&
+                now.isAfter(ZonedDateTime.parse(o.trade.openedAt).plusMinutes(MIN_HOLD_MIN)) &&
+                lastReview[o.trade.ideaId]?.let { now.isAfter(it.plusMinutes(REVIEW_EVERY_MIN)) } != false
+        }
+        if (due.isEmpty()) return
+        val value = state.fund + t.realizedPnlToday + (t.openPnl ?: 0.0)
+        for (o in due) {
+            val tr = o.trade
+            lastReview[tr.ideaId] = now
+            val idea = tracker.get(tr.ideaId)
+            val chart = idea?.let { runCatching { intel.snapshot(it.quoteKey) }.getOrNull() }
+            val context = buildJsonObject {
+                put("nowIST", now.toString())
+                put("squareOffIST", "15:15")
+                putJsonObject("trade") {
+                    put("instrument", "${tr.index} ${idea?.action ?: ""} via ${tr.symbol}")
+                    put("openedAtIST", tr.openedAt)
+                    put("quantity", tr.quantity)
+                    put("premiumEntry", tr.entryPrice); put("premiumNow", o.ltp); put("premiumPeak", tr.peakPrice)
+                    put("premiumStop", tr.stopPrice); put("premiumTarget", tr.targetPrice)
+                    put("pnlINR", o.pnl)
+                    put("riskAtEntryINR", abs(tr.entryPrice - tr.initialStop.takeIf { it > 0 }.let { it ?: tr.stopPrice }) * tr.quantity)
+                    idea?.let {
+                        put("underlyingEntry", it.entry); put("underlyingStop", it.stopLoss); put("underlyingTarget", it.target)
+                        put("rationale", it.rationale); put("invalidation", it.invalidation)
+                    }
+                }
+                putJsonObject("day") {
+                    put("realisedINR", t.realizedPnlToday)
+                    put("openINR", t.openPnl)
+                    if (state.target > 0) put("goal", "Target ${r0(state.target - state.fund)} profit today; ${r0(value - state.fund)} so far")
+                    put("dailyLossLeftINR", t.lossBudgetLeft)
+                }
+                put("chart", chart ?: JsonNull)
+            }
+            val body = buildJsonObject {
+                put("model", api.model)
+                put("max_tokens", 4000)
+                put("system", MANAGER)
+                putJsonObject("output_config") {
+                    put("effort", "medium")
+                    putJsonObject("format") { put("type", "json_schema"); put("schema", MANAGER_SCHEMA) }
+                }
+                put("fallbacks", "default")
+            }
+            val r = runCatching { api.create(body, "<position>\n$context\n</position>\n\nHOLD or EXIT this trade now?") }
+                .getOrElse { log.warn("Position manager call failed for {}: {}", tr.symbol, it.message); continue }
+            val parsed = runCatching { TallyJson.parseToJsonElement(r.text).jsonObject }.getOrNull() ?: continue
+            val decision = parsed.str("decision")
+            val reason = parsed.str("reason")
+            log.info("AI manager: {} {} P&L {} -> {}: {}", tr.index, tr.symbol, o.pnl?.let(::r0), decision, reason)
+            if (decision == "EXIT") trader.closeNow(tr.ideaId, "AI manager exit: ${reason.take(160)}")
+        }
+        lastReview.keys.retainAll(t.opens.map { it.trade.ideaId }.toSet())
     }
 
     private fun rollDay() {
@@ -266,6 +349,9 @@ class AiTraderDesk(
 
     companion object {
         const val MIN_FUND = 2000.0
+        /** Give a new trade a few minutes before the position manager first judges it. */
+        const val MIN_HOLD_MIN = 4L
+        const val REVIEW_EVERY_MIN = 2L
 
         private val SYSTEM = """
             You are the senior fund manager running a small intraday options book for one retail client in India.
@@ -306,6 +392,64 @@ class AiTraderDesk(
             entries earlier (e.g. "no new entries after 13:45") does not apply here; treat late-session timing as a
             factor to weigh (less time for the option to pay), not a ban.
         """.trimIndent()
+
+        private val GOAL_DAY = """
+            GOAL DAY: the client has set a profit target for today (see book.goal) and wants you trading towards it,
+            not passing on everything. The target is reached by several modest wins, not one big one: a separate
+            position manager reviews every open trade every couple of minutes and banks profit or cuts losses as
+            soon as the picture weakens, and everything is closed once the day's target is reached.
+            Your playbook's numeric thresholds (ATR multiples, R-distances, box spans, gap percentages, "a missing
+            number is a skip", the word "however") are SOFT here: a setup that misses one or two of them by a modest
+            margin, but has the right structure and direction, is a trade. Rule 10's target caps in 5m ATRs do not
+            apply (they contradict rule 14's stop distance); use reward/risk instead. Rank the candidates and,
+            unless every one is genuinely poor, take the best one.
+            Only these stay HARD:
+            - REGIME FIRST. Before ranking anything, write the regime in marketView: which index leads (NIFTY vs
+              BANKNIFTY change on the day), the VIX change, and each index's daily trend (daily EMA20/EMA50, daily
+              RSI). Risk-on regime = VIX falling or flat AND the leading index green, or the leading index in a daily
+              uptrend. In a risk-on regime take only LONGS (calls): pullbacks and higher lows in the leading index,
+              its sector and its strongest names, and tested-floor reversals in the leading sector. No puts at all,
+              not even on the weakest laggard. Risk-off regime (VIX rising more than 3% AND the leading index red, or
+              both indices in a daily downtrend) is the mirror: only puts, no calls. If the regime is genuinely mixed,
+              trade only the leading index in its own direction.
+            - Never short a name within 1x its 5m ATR of its day low, and never buy calls within 1x its 5m ATR of
+              its day high: that is where laggards bounce and leaders stall.
+            - The stop must be on the correct side of entry; option reward/risk at least 1.3.
+            - At most 2 positions, never an index call and an index put together; after 2 stops today, stop.
+            Sizing: riskPct 50 for a decent setup, 75-100 when it passes the playbook cleanly (especially a rule-2
+            relative-weakness trade), 25 after a losing trade today. Keep losses small: the client accepts losses
+            but wants them cut early. In passReason, if you pass on everything, name the single best candidate and
+            exactly which hard rule it breaks.
+        """.trimIndent()
+
+        private val MANAGER = """
+            You are the position manager of a small intraday options book in India: every trade BUYS an option
+            (call for LONG, put for SHORT) on NIFTY, BANKNIFTY or a liquid F&O stock. A broker stop-loss, a trailing
+            stop and a target are already in place. Every couple of minutes you look at each open trade and decide
+            HOLD or EXIT now at market.
+            The client wants about the day's profit target from several modest wins and wants losses kept small.
+            - In profit and the move is still working (price making progress in the trade direction, momentum and
+              structure intact, the 5m trend agreeing): HOLD and let the trailing stop work.
+            - In profit but the move is stalling or turning (lower highs on a long, a rejection, momentum fading,
+              price back through the 5m EMA9, a wall just ahead, time running out): EXIT and bank it. A banked
+              ₹2,000 beats a round trip to the stop.
+            - In loss and the thesis is breaking (the invalidation is close or hit, structure turned against the
+              trade, the market backdrop flipped): EXIT early rather than wait for the full stop.
+            - In loss but the thesis is intact and price is just noise inside the setup: HOLD. Don't exit on the
+              first red tick: brokerage, taxes and the spread make every exit cost money.
+            Option premiums decay when price stalls, so a trade going nowhere for 30+ minutes is a reason to exit.
+            reason: one or two sentences citing the data.
+        """.trimIndent()
+
+        private val MANAGER_SCHEMA = buildJsonObject {
+            put("type", "object")
+            put("additionalProperties", false)
+            putJsonArray("required") { add("decision"); add("reason") }
+            putJsonObject("properties") {
+                putJsonObject("decision") { put("type", "string"); putJsonArray("enum") { add("HOLD"); add("EXIT") } }
+                putJsonObject("reason") { put("type", "string") }
+            }
+        }
 
         private fun schema(ids: List<String>) = buildJsonObject {
             put("type", "object")

@@ -143,10 +143,19 @@ class MarketIntel(
     // ---------------------------------------------------------------- ideas
 
     /** Learning mode trades more so there is more to learn from; the AI trader still filters every idea. */
-    private fun callRule() = if (cfg.learningMode)
-        "LEARNING MODE (paper money): give LONG or SHORT whenever there is a tradeable setup with a logical stop and target; " +
-            "use NO_TRADE only when there is no defined setup at all. The fund manager filters, and every trade is reviewed so you learn."
-    else "Use NO_TRADE unless the setup is genuinely strong."
+    private fun callRule() = when {
+        cfg.learningMode ->
+            "LEARNING MODE (paper money): give LONG or SHORT whenever there is a tradeable setup with a logical stop and target; " +
+                "use NO_TRADE only when there is no defined setup at all. The fund manager filters, and every trade is reviewed so you learn."
+        goalDay() ->
+            "GOAL DAY: the client wants trades today towards a profit target. Give LONG or SHORT whenever there is a tradeable " +
+                "setup with a logical stop and target; use NO_TRADE only when there is no defined setup at all. A fund manager " +
+                "picks the best idea and a position manager cuts weak trades early, so you only need to propose them."
+        else -> "Use NO_TRADE unless the setup is genuinely strong."
+    }
+
+    /** True while the AI trader has a target for today; set by Application. */
+    var goalDay: () -> Boolean = { false }
 
     /** Lessons from reviewed trades ([TradeJournal.playbookPrompt]); empty until the first review. */
     var playbook: () -> String = { "" }
