@@ -460,7 +460,13 @@ class AiTrader(
     /** What the open trades lose if every stop is hit; a stop trailed above entry risks nothing. */
     private fun openRisk() = state.opens.sumOf { ((it.entryPrice - it.stopPrice) * it.quantity).coerceAtLeast(0.0) }
     /** Loss a new trade may risk: today's remaining loss limit minus what open trades could still lose. */
-    private fun riskBudgetForNew() = (lossBudgetLeft() - openRisk()).coerceAtLeast(0.0)
+    /** False when no new trade could be opened: slots full, daily loss budget used up, or the profit goal hit. */
+    suspend fun canOpenNew(): Boolean = mutex.withLock {
+        rollDay()
+        slotsLeft() > 0 && riskBudgetForNew() > 0 && !profitGoalReached()
+    }
+
+    private fun riskBudgetForNew() =(lossBudgetLeft() - openRisk()).coerceAtLeast(0.0)
     private fun slotsLeft() = (settings.current.maxOpenTrades - state.opens.size - state.pendings.size).coerceAtLeast(0)
     private fun busyUnderlying(index: String) = state.opens.any { it.index == index } || state.pendings.any { it.index == index }
     private fun profitGoalReached() = settings.current.dailyProfitGoal.let { it > 0 && state.realizedPnl >= it }

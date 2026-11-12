@@ -202,11 +202,8 @@ class AiTraderDesk(
             }
             put("fallbacks", "default")
         }
+        val stable = "$brief\n\n${journal.playbookPrompt()}"
         val prompt = """
-            $brief
-
-            ${journal.playbookPrompt()}
-
             <desk>
             $context
             </desk>
@@ -218,7 +215,7 @@ class AiTraderDesk(
             state.seen += candidates.map { it.id }.filter { it !in state.seen }
             save()
         }
-        val r = api.create(body, prompt)
+        val r = api.create(body, prompt, cachedPrefix = stable)
         if (r.stopReason == "refusal" || r.stopReason == "max_tokens") throw IllegalStateException("AI trader decision stopped: ${r.stopReason}")
         val parsed = TallyJson.parseToJsonElement(r.text).jsonObject
         val wanted = parsed["trades"]!!.jsonArray.map { it.jsonObject }
@@ -416,9 +413,12 @@ class AiTraderDesk(
               its day high: that is where laggards bounce and leaders stall.
             - The stop must be on the correct side of entry; option reward/risk at least 1.3.
             - At most 2 positions, never an index call and an index put together; after 2 stops today, stop.
-            Sizing: riskPct 50 for a decent setup, 75-100 when it passes the playbook cleanly (especially a rule-2
-            relative-weakness trade), 25 after a losing trade today. Keep losses small: the client accepts losses
-            but wants them cut early. In passReason, if you pass on everything, name the single best candidate and
+            Sizing: the client has chosen to press for the full target today and accepts the higher risk. Use
+            riskPct 100 for any trade you take, including after a losing trade; do not shrink size after losses.
+            The broker stop-loss and the daily loss cap still bound every trade and the day, so size is the lever,
+            not the stop. Prefer the leading index (BANKNIFTY/NIFTY) in the regime direction, where 2+ lots fit and
+            one clean move can cover most of the gap to the target. Never re-enter the same underlying within
+            15 minutes of a loss on it. In passReason, if you pass on everything, name the single best candidate and
             exactly which hard rule it breaks.
         """.trimIndent()
 
@@ -427,12 +427,14 @@ class AiTraderDesk(
             (call for LONG, put for SHORT) on NIFTY, BANKNIFTY or a liquid F&O stock. A broker stop-loss, a trailing
             stop and a target are already in place. Every couple of minutes you look at each open trade and decide
             HOLD or EXIT now at market.
-            The client wants about the day's profit target from several modest wins and wants losses kept small.
+            The client is pressing for the day's full profit target and needs winners to run; small banked
+            profits do not get there. Losses are already bounded by the broker stop and the daily loss cap.
             - In profit and the move is still working (price making progress in the trade direction, momentum and
-              structure intact, the 5m trend agreeing): HOLD and let the trailing stop work.
-            - In profit but the move is stalling or turning (lower highs on a long, a rejection, momentum fading,
-              price back through the 5m EMA9, a wall just ahead, time running out): EXIT and bank it. A banked
-              ₹2,000 beats a round trip to the stop.
+              structure intact, the 5m trend agreeing): HOLD and let the trailing stop and target work.
+            - In profit but a minor pause (one red bar, a shallow pullback that holds the 5m EMA21): HOLD.
+            - In profit and the move has clearly turned (a 5m close back through the EMA21, a lower high AND lower
+              low on a long or the mirror on a short, the backdrop flipped, or under 20 minutes to 15:15): EXIT
+              and bank it.
             - In loss and the thesis is breaking (the invalidation is close or hit, structure turned against the
               trade, the market backdrop flipped): EXIT early rather than wait for the full stop.
             - In loss but the thesis is intact and price is just noise inside the setup: HOLD. Don't exit on the

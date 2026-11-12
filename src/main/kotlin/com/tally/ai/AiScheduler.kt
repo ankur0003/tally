@@ -55,8 +55,8 @@ class AiScheduler(
                 guard("idea scoring") { if (kiteReady()) tracker.evaluate() }
                 if (cfg.scheduler && api.configured) {
                     guard("brief") { if (briefDue()) intel.refreshBrief(kiteReady()) }
-                    guard("ideas") { if (ideasDue()) runIdeas() }
-                    guard("stock ideas") { if (stockIdeasDue()) runStockIdeas() }
+                    guard("ideas") { if (ideasDue() && tradeable()) runIdeas() }
+                    guard("stock ideas") { if (stockIdeasDue() && tradeable()) runStockIdeas() }
                     guard("day review") { if (dayReviewDue()) journal.reviewDay(clock.now().toLocalDate().toString(), "") }
                 }
                 delay(60_000)
@@ -83,6 +83,12 @@ class AiScheduler(
         guard("AI trader") { desk.decide() }
         return run
     }
+
+    /**
+     * Ideas cost most of the AI bill; skip them when none could be traded (slots full, daily loss budget used,
+     * profit goal hit). The next run starts as soon as a slot frees, since the last run is then overdue.
+     */
+    private suspend fun tradeable(): Boolean = trader.canOpenNew()
 
     private fun stockIdeasDue(): Boolean {
         if (cfg.stocks.isEmpty()) return false

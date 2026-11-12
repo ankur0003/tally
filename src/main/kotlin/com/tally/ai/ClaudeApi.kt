@@ -58,33 +58,51 @@ class ClaudeApi(private val cfg: AnthropicConfig, private val http: HttpClient, 
     /**
      * Sends [body] (without "messages") with a single user turn. Continues automatically on pause_turn,
      * up to [maxContinuations] times, by echoing the partial assistant turn back unchanged.
+     *
+     * [cachedPrefix] is the slow-changing start of the user turn (news brief, playbook). When given, the system
+     * prompt and that prefix are cached for an hour, so repeat calls within the hour pay ~5% for those tokens.
      */
-    suspend fun create(body: JsonObject, userContent: String, maxContinuations: Int = 4): ClaudeResult {
+    suspend fun create(body: JsonObject, userContent: String, maxContinuations: Int = 4, cachedPrefix: String? = null): ClaudeResult {
         check(cfg.configured) { "ANTHROPIC_API_KEY is not set" }
         val content = mutableListOf<JsonObject>()
         var inTok = 0L
         var outTok = 0L
+        var cacheRead = 0L
+        var cacheWrite = 0L
         var searches = 0
+        var cost = 0.0
         var stop: String? = null
         var model = cfg.model
+        val sendBody = if (cachedPrefix == null) body else withCachedSystem(body)
 
         for (round in 0..maxContinuations) {
             val messages = buildJsonArray {
-                addJsonObject { put("role", "user"); put("content", userContent) }
+                addJsonObject {
+                    put("role", "user")
+                    if (cachedPrefix == null) put("content", userContent)
+                    else putJsonArray("content") {
+                        addJsonObject { put("type", "text"); put("text", cachedPrefix); put("cache_control", CACHE_1H) }
+                        addJsonObject { put("type", "text"); put("text", userContent) }
+                    }
+                }
                 if (content.isNotEmpty()) addJsonObject { put("role", "assistant"); put("content", JsonArray(content)) }
             }
-            val request = JsonObject(body + ("messages" to messages))
+            val request = JsonObject(sendBody + ("messages" to messages))
             val root = post(request.toString())
             root["content"]?.jsonArray?.forEach { content += it.jsonObject }
             stop = root["stop_reason"]?.jsonPrimitive?.contentOrNull
             model = root["model"]?.jsonPrimitive?.contentOrNull ?: model
             root["usage"]?.jsonObject?.let { u ->
-                val i = u.long("input_tokens") + u.long("cache_creation_input_tokens") + u.long("cache_read_input_tokens")
+                val plain = u.long("input_tokens")
+                val write = u.long("cache_creation_input_tokens")
+                val read = u.long("cache_read_input_tokens")
                 val o = u.long("output_tokens")
                 val w = (u["server_tool_use"] as? JsonObject)?.long("web_search_requests")?.toInt() ?: 0
-                inTok += i; outTok += o; searches += w
+                inTok += plain + write + read; outTok += o; searches += w; cacheRead += read; cacheWrite += write
                 // Count spend per HTTP round so a failure in a later round can't hide money already spent.
-                val roundCost = i * INPUT_USD_PER_TOKEN + o * OUTPUT_USD_PER_TOKEN + w * WEB_SEARCH_USD
+                // 1-hour cache writes bill at 2x input, cache reads at 0.05x.
+                val roundCost = (plain + write * 2.0 + read * 0.05) * INPUT_USD_PER_TOKEN + o * OUTPUT_USD_PER_TOKEN + w * WEB_SEARCH_USD
+                cost += roundCost
                 spendToday()
                 val updated = spend.updateAndGet { it.copy(usd = it.usd + roundCost, calls = it.calls + if (round == 0) 1 else 0, webSearches = it.webSearches + w) }
                 spendFile?.let { f -> runCatching { java.nio.file.Files.writeString(f, TallyJson.encodeToString(AiSpend.serializer(), updated)) } }
@@ -92,9 +110,17 @@ class ClaudeApi(private val cfg: AnthropicConfig, private val http: HttpClient, 
             if (stop != "pause_turn") break
         }
 
-        val cost = inTok * INPUT_USD_PER_TOKEN + outTok * OUTPUT_USD_PER_TOKEN + searches * WEB_SEARCH_USD
-        log.info("Claude call: {} in / {} out tokens, {} searches, \${}, stop={}", inTok, outTok, searches, "%.3f".format(cost), stop)
+        log.info("Claude call: {} in ({} cache read, {} cache write) / {} out tokens, {} searches, \${}, stop={}",
+            inTok, cacheRead, cacheWrite, outTok, searches, "%.3f".format(cost), stop)
         return ClaudeResult(content, stop, model, inTok, outTok, searches, cost)
+    }
+
+    /** Turns a plain-string system prompt into a text block cached for an hour. */
+    private fun withCachedSystem(body: JsonObject): JsonObject {
+        val system = (body["system"] as? JsonPrimitive)?.contentOrNull ?: return body
+        return JsonObject(body + ("system" to buildJsonArray {
+            addJsonObject { put("type", "text"); put("text", system); put("cache_control", CACHE_1H) }
+        }))
     }
 
     private suspend fun post(body: String): JsonObject {
@@ -137,6 +163,8 @@ class ClaudeApi(private val cfg: AnthropicConfig, private val http: HttpClient, 
         private const val INPUT_USD_PER_TOKEN = 4.0 / 1_000_000
         private const val OUTPUT_USD_PER_TOKEN = 20.0 / 1_000_000
         private const val WEB_SEARCH_USD = 10.0 / 1_000
+        // Calls repeat every few minutes, longer than the default 5-minute cache lifetime, so cache for an hour.
+        private val CACHE_1H = buildJsonObject { put("type", "ephemeral"); put("ttl", "1h") }
 
         /** Common request fields. Refusal fallback lets the API retry a declined request on a fallback model. */
         fun baseBody(model: String, system: String, maxTokens: Int, effort: String) = buildJsonObject {

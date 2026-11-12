@@ -186,11 +186,8 @@ class MarketIntel(
             }
             put("fallbacks", "default")
         }
+        val stable = "$brief\n\n${playbook()}"
         val prompt = """
-            $brief
-
-            ${playbook()}
-
             Live data:
             <market_data>
             $context
@@ -199,7 +196,7 @@ class MarketIntel(
             Give one entry per index (NIFTY and BANKNIFTY). ${callRule()}
         """.trimIndent()
 
-        val r = api.create(body, prompt)
+        val r = api.create(body, prompt, cachedPrefix = stable)
         if (r.stopReason == "refusal" || r.stopReason == "max_tokens") {
             throw IllegalStateException("Idea generation stopped: ${r.stopReason}")
         }
@@ -282,11 +279,8 @@ class MarketIntel(
             }
             put("fallbacks", "default")
         }
+        val stable = "$brief\n\n${playbook()}"
         val prompt = """
-            $brief
-
-            ${playbook()}
-
             Live data for today's biggest movers among liquid F&O stocks:
             <market_data>
             $context
@@ -295,7 +289,7 @@ class MarketIntel(
             Give one entry per stock (${shortlist.joinToString()}). ${callRule()}
         """.trimIndent()
 
-        val r = api.create(body, prompt)
+        val r = api.create(body, prompt, cachedPrefix = stable)
         if (r.stopReason == "refusal" || r.stopReason == "max_tokens") throw IllegalStateException("Stock idea generation stopped: ${r.stopReason}")
         val parsed = TallyJson.parseToJsonElement(r.text).jsonObject
         val ideas = parsed["ideas"]!!.jsonArray.map { it.jsonObject }.mapNotNull { j ->
