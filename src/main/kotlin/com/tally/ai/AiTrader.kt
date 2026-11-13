@@ -74,6 +74,8 @@ data class PendingTrade(
     /** AI trader only: loss cap and money for this trade, decided by the fund-manager call. */
     val maxLoss: Double? = null,
     val capital: Double? = null,
+    /** Which side of the entry the index was on when armed; entry fires only once price reaches the level. */
+    val armedBelow: Boolean? = null,
 )
 
 @Serializable
@@ -136,7 +138,10 @@ class AiTrader(
     private val log = LoggerFactory.getLogger(AiTrader::class.java)
     // Separate state per mode: paper P&L must never count toward live loss limits or the profit goal.
     private val file = dataDir.resolve(if (orders.broker.mode == TradingMode.LIVE) "ai_trader_live.json" else "ai_trader.json")
+    private val live = orders.broker.mode == TradingMode.LIVE
     private val mutex = Mutex()
+    /** Last time a new entry may start: 14:00 with real money, 14:45 in the paper learning account. */
+    val lastEntry: LocalTime get() = if (live) LIVE_LAST_ENTRY else LAST_ENTRY
     /** Trade lifecycle hooks for the [TradeJournal]; must not block (they run under the trader's lock). */
     var onOpened: (AiTrade, TradeIdea) -> Unit = { _, _ -> }
     var onClosed: (AiTrade) -> Unit = {}
@@ -332,12 +337,15 @@ class AiTrader(
             error("Confidence ${idea.confidence}% is below the ${cfg.minConfidence}% minimum; use the High-risk section to take it")
         }
         if (!clock.isOpen(now)) error("Market is closed")
-        if (clock.isAfter(LAST_ENTRY, now)) error("No new trades after $LAST_ENTRY")
+        if (clock.isAfter(lastEntry, now)) error("No new trades after $lastEntry")
+        if (live && attemptsToday(idea.index, idea.action) >= MAX_ATTEMPTS) {
+            error("Already $MAX_ATTEMPTS ${idea.index} ${idea.action} trades today (the max per underlying and direction)")
+        }
         if (profitGoalReached()) error("Daily profit goal reached; trading is done for today")
         if (lossBudgetLeft() < 1) error("Daily loss limit reached; no new trades today")
         if (riskBudgetForNew() < 1) error("Open trades already use the rest of today's loss limit (₹%,.0f at risk)".format(openRisk()))
         val ideaEnd = ZonedDateTime.parse(idea.createdAt).plusMinutes(idea.horizonMinutes.toLong())
-        val expires = minOf(ideaEnd, now.with(LAST_ENTRY))
+        val expires = minOf(ideaEnd, now.with(lastEntry))
         if (!now.isBefore(expires)) error("This idea's time window has passed")
 
         val pending = PendingTrade(
@@ -346,12 +354,12 @@ class AiTrader(
             lots = lots, targetMultiple = targetMultiple, source = source, maxLoss = maxLoss, capital = capital,
         )
         val spot = market.ltp(idea.quoteKey)
-        if (nearEntry(spot, idea.entry)) {
+        if (reached(spot, idea.entry, null)) {
             val trade = enter(pending, idea, now)
             return trade?.let { "Bought ${it.symbol} x${it.quantity} @ %.2f".format(it.entryPrice) }
                 ?: "Entry not placed: ${state.log.lastOrNull().orEmpty()}"
         }
-        state.pendings += pending
+        state.pendings += pending.copy(armedBelow = spot < idea.entry)
         note("WAITING ${idea.index} ${idea.action}: buy when price is near %.1f (now %.1f), until %s".format(idea.entry, spot, expires.toLocalTime().withNano(0)))
         return "Waiting for ${idea.index} to reach %.1f (now %.1f)".format(idea.entry, spot)
     }
@@ -362,7 +370,7 @@ class AiTrader(
         when {
             long && spot <= p.indexStop || !long && spot >= p.indexStop -> { state.pendings.remove(p); note("Cancelled waiting ${p.index} ${p.action}: price hit the stop level before entry") }
             !now.isBefore(ZonedDateTime.parse(p.expiresAt)) -> { state.pendings.remove(p); note("Cancelled waiting ${p.index} ${p.action}: entry not reached in time") }
-            nearEntry(spot, p.indexEntry) -> {
+            reached(spot, p.indexEntry, p.armedBelow) -> {
                 state.pendings.remove(p)
                 val idea = tracker.get(p.ideaId) ?: return note("Idea ${p.ideaId} vanished; entry skipped")
                 enter(p, idea, now)
@@ -463,14 +471,33 @@ class AiTrader(
     /** False when no new trade could be opened: slots full, daily loss budget used up, or the profit goal hit. */
     suspend fun canOpenNew(): Boolean = mutex.withLock {
         rollDay()
-        slotsLeft() > 0 && riskBudgetForNew() > 0 && !profitGoalReached()
+        slotsLeft() > 0 && riskBudgetForNew() > 0 && !profitGoalReached() && !clock.isAfter(lastEntry, clock.now())
     }
 
     private fun riskBudgetForNew() =(lossBudgetLeft() - openRisk()).coerceAtLeast(0.0)
     private fun slotsLeft() = (settings.current.maxOpenTrades - state.opens.size - state.pendings.size).coerceAtLeast(0)
     private fun busyUnderlying(index: String) = state.opens.any { it.index == index } || state.pendings.any { it.index == index }
     private fun profitGoalReached() = settings.current.dailyProfitGoal.let { it > 0 && state.realizedPnl >= it }
-    private fun nearEntry(spot: Double, entry: Double) = abs(spot - entry) / entry <= ENTRY_TOLERANCE
+
+    /**
+     * True once the index has come to the entry level from the side it was armed on. A breakout long armed below
+     * 61,520 fires at 61,508 or higher, not 60 points short of the break. It may run past the level by up to
+     * [ENTRY_TOLERANCE] before the entry counts as missed. Unknown side (arming, older state): within the slack only.
+     */
+    private fun reached(spot: Double, entry: Double, armedBelow: Boolean?): Boolean {
+        val d = (spot - entry) / entry
+        return when (armedBelow) {
+            true -> d >= -TRIGGER_SLACK && d <= ENTRY_TOLERANCE
+            false -> d <= TRIGGER_SLACK && d >= -ENTRY_TOLERANCE
+            null -> abs(d) <= TRIGGER_SLACK
+        }
+    }
+
+    /** Trades opened today on [index] in [action]'s direction (calls for LONG, puts for SHORT), open or closed. */
+    private fun attemptsToday(index: String, action: String): Int {
+        val type = if (action == "LONG") "CE" else "PE"
+        return (state.opens + state.closed).count { it.index == index && it.optionType == type }
+    }
 
     private fun rollDay() {
         val today = LocalDate.now(IST).toString()
@@ -498,12 +525,17 @@ class AiTrader(
 
     companion object {
         private val LAST_ENTRY: LocalTime = LocalTime.of(14, 45)
+        private val LIVE_LAST_ENTRY: LocalTime = LocalTime.of(14, 0)
+        /** Live only: entries per underlying and direction per day. */
+        private const val MAX_ATTEMPTS = 2
         /** Trade source for manual trades taken from the High-risk section (never auto-traded). */
         const val HIGH_RISK = "high-risk"
         /** Trade source for the autonomous AI trader (fund-capped, decided by [AiTraderDesk]). */
         const val AI_TRADER = "ai-trader"
-        /** Index within 0.1% of the idea's entry counts as "at entry". */
+        /** How far past the entry level the index may run and still be bought (0.1%). */
         private const val ENTRY_TOLERANCE = 0.001
+        /** How close short of the entry level counts as reached (0.02%, about 12 BANKNIFTY points). */
+        private const val TRIGGER_SLACK = 0.0002
         /** SL limit price this far below the trigger so a fast-falling option still fills. */
         private const val SL_LIMIT_CUSHION = 0.10
     }

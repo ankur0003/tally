@@ -15,6 +15,8 @@ tally:
   dataDir: "$TALLY_DATA_DIR:"
   # Hostname served by Caddy (deploy/setup-https.sh). The dashboard on that origin may call the API.
   publicHost: "$TALLY_PUBLIC_HOST:"
+  # Optional: URL that alerts (e.g. Kite not logged in) are POSTed to as plain text, such as https://ntfy.sh/<topic>.
+  alertUrl: "$TALLY_ALERT_URL:"
 
   kite:
     apiKey: "$KITE_API_KEY:"

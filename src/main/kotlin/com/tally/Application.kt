@@ -6,6 +6,7 @@ import com.tally.broker.LiveBroker
 import com.tally.broker.PaperBroker
 import com.tally.config.AppConfig
 import com.tally.config.TradingMode
+import com.tally.util.Alerts
 import com.tally.kite.KiteClient
 import com.tally.kite.KiteSessionStore
 import com.tally.market.GlobalMarkets
@@ -70,7 +71,11 @@ class Services(val config: AppConfig) {
     }
     val aiDesk = AiTraderDesk(claude, config.ai, intel, ideas, aiTrader, tradeSettings, global, journal, clock, config.mode == TradingMode.LIVE, config.dataDir)
         .also { intel.goalDay = it::goalDay }
-    val aiScheduler = AiScheduler(config.ai, claude, intel, ideas, aiTrader, aiDesk, journal, clock, kiteReady = { kite.isLoggedIn })
+    val alerts = Alerts(config.alertUrl, http)
+    val aiScheduler = AiScheduler(
+        config.ai, claude, intel, ideas, aiTrader, aiDesk, journal, clock, kiteReady = { kite.isLoggedIn },
+        alerts = alerts, loginUrl = if (config.publicHost.isNotBlank()) "https://${config.publicHost}/auth/login" else "the dashboard",
+    )
 }
 
 fun Application.module() {

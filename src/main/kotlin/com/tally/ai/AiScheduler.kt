@@ -1,6 +1,7 @@
 package com.tally.ai
 
 import com.tally.config.AiConfig
+import com.tally.util.Alerts
 import com.tally.util.MarketClock
 import kotlinx.coroutines.*
 import org.slf4j.LoggerFactory
@@ -26,6 +27,8 @@ class AiScheduler(
     private val journal: TradeJournal,
     private val clock: MarketClock,
     private val kiteReady: () -> Boolean,
+    private val alerts: Alerts? = null,
+    private val loginUrl: String = "the dashboard",
 ) {
     private val log = LoggerFactory.getLogger(AiScheduler::class.java)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -34,6 +37,7 @@ class AiScheduler(
     @Volatile private var lastIdeasAt: ZonedDateTime? = null
     @Volatile private var lastStockIdeasAt: ZonedDateTime? = null
     @Volatile private var dayReviewTried = ""
+    private val loginAlertsSent = mutableSetOf<String>()
 
     fun start() {
         scope.launch {
@@ -47,6 +51,12 @@ class AiScheduler(
             while (isActive) {
                 if (cfg.scheduler && api.configured) guard("position manager") { if (kiteReady()) desk.manageOpen() }
                 delay(30_000)
+            }
+        }
+        scope.launch {
+            while (isActive) {
+                guard("login alert") { checkLogin() }
+                delay(60_000)
             }
         }
         scope.launch {
@@ -100,6 +110,20 @@ class AiScheduler(
         return Duration.between(last, now).toMinutes() >= cfg.stockIdeaMinutes
     }
 
+    /**
+     * Pushes an alert when Kite is not logged in on a trading day: at 09:00 (time to log in before ideas start at
+     * 09:25), then 09:20, 10:00, 11:00 and 12:00 while it is still missing. Each slot fires at most once a day.
+     */
+    private suspend fun checkLogin() {
+        val now = clock.now()
+        if (!clock.isTradingDay(now) || kiteReady()) return
+        val slot = LOGIN_ALERT_TIMES.lastOrNull { !now.toLocalTime().isBefore(it) } ?: return
+        if (now.toLocalTime().isAfter(slot.plusMinutes(10))) return // started late; skip stale slots
+        val key = "${now.toLocalDate()} $slot"
+        if (!loginAlertsSent.add(key)) return
+        alerts?.send("tally: Kite not logged in", "No Zerodha session at ${slot}, so the bot cannot trade today until you log in: $loginUrl")
+    }
+
     /** End-of-day debrief into the playbook, once per trading day after the 15:15 square-off. */
     private fun dayReviewDue(): Boolean {
         val now = clock.now()
@@ -128,6 +152,10 @@ class AiScheduler(
         if (overBudget()) return false
         val last = lastIdeasAt ?: intel.latestRun?.let { ZonedDateTime.parse(it.at) } ?: return true
         return Duration.between(last, now).toMinutes() >= cfg.ideaMinutes
+    }
+
+    private companion object {
+        val LOGIN_ALERT_TIMES = listOf(LocalTime.of(9, 0), LocalTime.of(9, 20), LocalTime.of(10, 0), LocalTime.of(11, 0), LocalTime.of(12, 0))
     }
 
     private suspend fun guard(name: String, block: suspend () -> Unit) {

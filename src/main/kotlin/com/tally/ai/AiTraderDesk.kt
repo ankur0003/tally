@@ -133,13 +133,15 @@ class AiTraderDesk(
         val plans = trader.plans(candidates)
         val charts = candidates.associate { it.id to runCatching { intel.snapshot(it.quoteKey) }.getOrNull() }
         val india = runCatching { intel.indiaQuotes() }.getOrNull()
+        // Compact intraday read of both indices so the desk can judge today's direction even when no index idea is on offer.
+        val indexTape = AI_INDICES.mapValues { (_, key) -> runCatching { indexTape(intel.snapshot(key)) }.getOrNull() }
         val globalQuotes = TallyJson.encodeToJsonElement(global.snapshot())
         val stats = TallyJson.encodeToJsonElement(ListSerializer(BucketStats.serializer()), tracker.stats())
         val recentTrades = journal.recentLines(12)
         val recentDays = journal.recentDays()
         val context = buildJsonObject {
             put("nowIST", now.toString())
-            put("lastNewEntryIST", "14:45; everything is closed by 15:15")
+            put("lastNewEntryIST", "${trader.lastEntry}; everything is closed by 15:15")
             putJsonObject("book") {
                 put("fundTotal", state.fund)
                 put("fundFree", fundFree)
@@ -163,6 +165,7 @@ class AiTraderDesk(
             putJsonArray("yourRecentTradesAndLessons") { recentTrades.forEach { add(it) } }
             putJsonArray("yourRecentDays") { recentDays.forEach { add(it) } }
             put("india", india ?: JsonNull)
+            putJsonObject("indexTape") { indexTape.forEach { (name, v) -> put(name, v ?: JsonNull) } }
             put("global", globalQuotes)
             putJsonArray("candidates") {
                 candidates.forEach { i ->
@@ -342,6 +345,23 @@ class AiTraderDesk(
     }
 
     private fun r0(d: Double) = Math.round(d).toDouble()
+
+    /** LTP against the day open and the 5m EMAs, from a chart snapshot. */
+    private fun indexTape(snap: JsonObject): JsonObject {
+        fun num(o: JsonObject?, k: String) = o?.get(k)?.jsonPrimitive?.doubleOrNull
+        val ltp = num(snap, "ltp")
+        val ema9 = num(snap, "ema9_5m")
+        val ema21 = num(snap, "ema21_5m")
+        val today = snap["today"] as? JsonObject
+        val open = num(today, "open")
+        return buildJsonObject {
+            put("ltp", ltp); put("dayOpen", open); put("dayHigh", num(today, "high")); put("dayLow", num(today, "low"))
+            put("ema9_5m", ema9); put("ema21_5m", ema21)
+            if (ltp != null && open != null) put("vsDayOpen", if (ltp >= open) "above" else "below")
+            if (ltp != null && ema21 != null) put("vsEma21_5m", if (ltp >= ema21) "above" else "below")
+            if (ema9 != null && ema21 != null) put("ema9VsEma21", if (ema9 >= ema21) "above" else "below")
+        }
+    }
     private fun JsonObject.str(k: String) = this[k]?.jsonPrimitive?.contentOrNull.orEmpty()
 
     companion object {
@@ -401,14 +421,21 @@ class AiTraderDesk(
             apply (they contradict rule 14's stop distance); use reward/risk instead. Rank the candidates and,
             unless every one is genuinely poor, take the best one.
             Only these stay HARD:
-            - REGIME FIRST. Before ranking anything, write the regime in marketView: which index leads (NIFTY vs
-              BANKNIFTY change on the day), the VIX change, and each index's daily trend (daily EMA20/EMA50, daily
-              RSI). Risk-on regime = VIX falling or flat AND the leading index green, or the leading index in a daily
-              uptrend. In a risk-on regime take only LONGS (calls): pullbacks and higher lows in the leading index,
-              its sector and its strongest names, and tested-floor reversals in the leading sector. No puts at all,
-              not even on the weakest laggard. Risk-off regime (VIX rising more than 3% AND the leading index red, or
-              both indices in a daily downtrend) is the mirror: only puts, no calls. If the regime is genuinely mixed,
-              trade only the leading index in its own direction.
+            - TODAY'S TAPE FIRST. Before ranking anything, write in marketView NIFTY's and BANKNIFTY's % change on
+              the day, where each trades against its day open and its 5m EMA21, and the VIX change. The direction
+              comes from today's session, not from the daily chart, and both directions are equally valid:
+              * Down day (both indices red, or their average change -0.3% or worse, and trading below the day open):
+                puts are the main trade. Prefer puts in the weaker index, the weakest sector and its weakest names.
+                Calls only in a name that leads NIFTY by +1% or more.
+              * Up day (the mirror: both green, or average +0.3% or better, above the day open): calls are the main
+                trade, in the stronger index and the leading names. Puts only in a name that lags NIFTY by -1% or more.
+              * Mixed or flat: trade each index or stock in its own intraday direction (5m EMA9 vs EMA21, price vs
+                day open).
+              VIX is a tiebreaker (rising favours puts, falling favours calls), never a ban. The daily trend
+              (EMA20/EMA50, daily RSI) is background only: a put on a red day in a daily uptrend is allowed, so aim
+              its target at the nearest support rather than a deep move. Any playbook condition that bans puts or
+              calls because of the daily trend or a VIX threshold is SOFT, like the other playbook numbers. Never
+              trade an index option against that index's own intraday direction.
             - Never short a name within 1x its 5m ATR of its day low, and never buy calls within 1x its 5m ATR of
               its day high: that is where laggards bounce and leaders stall.
             - The stop must be on the correct side of entry; option reward/risk at least 1.3.
@@ -416,7 +443,7 @@ class AiTraderDesk(
             Sizing: the client has chosen to press for the full target today and accepts the higher risk. Use
             riskPct 100 for any trade you take, including after a losing trade; do not shrink size after losses.
             The broker stop-loss and the daily loss cap still bound every trade and the day, so size is the lever,
-            not the stop. Prefer the leading index (BANKNIFTY/NIFTY) in the regime direction, where 2+ lots fit and
+            not the stop. Prefer an index (BANKNIFTY/NIFTY) in today's direction, where 2+ lots fit and
             one clean move can cover most of the gap to the target. Never re-enter the same underlying within
             15 minutes of a loss on it. In passReason, if you pass on everything, name the single best candidate and
             exactly which hard rule it breaks.

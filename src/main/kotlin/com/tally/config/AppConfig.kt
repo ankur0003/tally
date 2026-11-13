@@ -101,6 +101,8 @@ data class AppConfig(
     val dataDir: Path,
     /** Public HTTPS hostname behind the reverse proxy (e.g. tally.example.com), or blank when only reached via the tunnel. */
     val publicHost: String,
+    /** Where alerts are POSTed (blank = log only). */
+    val alertUrl: String = "",
     val kite: KiteConfig,
     val anthropic: AnthropicConfig,
     val risk: RiskConfig,
@@ -140,6 +142,7 @@ data class AppConfig(
                 apiToken = t.str("apiToken").ifBlank { UUID.randomUUID().toString() },
                 dataDir = Paths.get(dataDir),
                 publicHost = t.str("publicHost").trim().lowercase(),
+                alertUrl = t.str("alertUrl").trim(),
                 kite = t.config("kite").let {
                     KiteConfig(it.str("apiKey"), it.str("apiSecret"), it.str("baseUrl"), it.str("loginUrl"), it.str("userId").uppercase())
                 },
