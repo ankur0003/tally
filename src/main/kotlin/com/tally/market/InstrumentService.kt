@@ -74,11 +74,14 @@ class InstrumentService(private val kite: KiteClient, dataDir: Path) {
     /**
      * ATM option on the nearest expiry. On expiry day itself we roll to the next expiry: gamma and
      * theta on a same-day contract are too violent for a polling bot.
+     *
+     * Stock options ([stock] = true) skip any expiry within [STOCK_EXPIRY_BUFFER_DAYS]: they settle by physical
+     * delivery, and Zerodha rejects fresh MIS buys on them in expiry week ("compulsory physical delivery").
      */
-    suspend fun atmOption(underlying: String, spot: Double, type: OptionType): Instrument {
+    suspend fun atmOption(underlying: String, spot: Double, type: OptionType, stock: Boolean = false): Instrument {
         val today = LocalDate.now(IST)
         val expiries = expiries(underlying)
-        val expiry = expiries.firstOrNull { it.isAfter(today) } ?: expiries.firstOrNull()
+        val expiry = pickExpiry(expiries, today, stock)
             ?: throw IllegalStateException("No live $underlying options found")
         return optionChain(underlying, spot, expiry, width = 0).firstOrNull { it.instrumentType == type.name }
             ?: throw IllegalStateException("No ATM $type for $underlying @ $spot")
@@ -92,6 +95,16 @@ class InstrumentService(private val kite: KiteClient, dataDir: Path) {
     }
 
     companion object {
+        /** Calendar days before a stock option's expiry from which we roll to the next month's contract. */
+        const val STOCK_EXPIRY_BUFFER_DAYS = 7L
+
+        /** Nearest expiry after today; for stock options also at least [STOCK_EXPIRY_BUFFER_DAYS] away. */
+        fun pickExpiry(expiries: List<LocalDate>, today: LocalDate, stock: Boolean): LocalDate? {
+            val sorted = expiries.sorted()
+            val earliest = if (stock) today.plusDays(STOCK_EXPIRY_BUFFER_DAYS) else today
+            return sorted.firstOrNull { it.isAfter(earliest) } ?: if (stock) null else sorted.firstOrNull()
+        }
+
         fun parseCsv(csv: String): List<Instrument> {
             val lines = csv.lineSequence().filter { it.isNotBlank() }.iterator()
             if (!lines.hasNext()) return emptyList()

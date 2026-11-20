@@ -80,7 +80,7 @@ class OptionPlanner(
         require(idea.action == "LONG" || idea.action == "SHORT") { "Idea ${idea.id} is not directional" }
         val type = if (idea.action == "LONG") OptionType.CE else OptionType.PE
         val spot = market.ltp(idea.quoteKey)
-        val opt = instruments.atmOption(idea.index, spot, type)
+        val opt = instruments.atmOption(idea.index, spot, type, stock = idea.kind == "STOCK")
         val q = market.quote(listOf("NFO:${opt.tradingsymbol}"))["NFO:${opt.tradingsymbol}"]
         val premium = q?.lastPrice ?: 0.0
         check(premium > 0) { "No price for ${opt.tradingsymbol}" }

@@ -74,6 +74,14 @@ data class PendingTrade(
     /** AI trader only: loss cap and money for this trade, decided by the fund-manager call. */
     val maxLoss: Double? = null,
     val capital: Double? = null,
+    /**
+     * AI trader only: money held back from the desk fund while this trade waits for entry (the planned premium
+     * plus a cushion). [capital] is only the sizing cap; reserving all of it would leave the desk no fund for
+     * other ideas until the wait ends. Null on old records: [capital] is reserved instead.
+     */
+    val reserved: Double? = null,
+    /** AI trader money in use by other trades when this one was armed; entry subtracts anything spent since. */
+    val fundInUseAtArm: Double? = null,
     /** Which side of the entry the index was on when armed; entry fires only once price reaches the level. */
     val armedBelow: Boolean? = null,
 )
@@ -213,10 +221,11 @@ class AiTrader(
     }
 
     /** Premium tied up in AI-trader trades that are open, plus the money reserved by ones waiting for entry. */
-    suspend fun aiTraderFundInUse(): Double = mutex.withLock {
+    suspend fun aiTraderFundInUse(): Double = mutex.withLock { fundInUse() }
+
+    private fun fundInUse(): Double =
         state.opens.filter { it.source == AI_TRADER }.sumOf { it.investment } +
-            state.pendings.filter { it.source == AI_TRADER }.sumOf { it.capital ?: 0.0 }
-    }
+            state.pendings.filter { it.source == AI_TRADER }.sumOf { it.reserved ?: it.capital ?: 0.0 }
 
     /** Cancels one waiting trade, or all of them when [ideaId] is null. */
     suspend fun cancelPending(ideaId: String? = null) = mutex.withLock {
@@ -359,9 +368,17 @@ class AiTrader(
             return trade?.let { "Bought ${it.symbol} x${it.quantity} @ %.2f".format(it.entryPrice) }
                 ?: "Entry not placed: ${state.log.lastOrNull().orEmpty()}"
         }
-        state.pendings += pending.copy(armedBelow = spot < idea.entry)
+        state.pendings += pending.copy(armedBelow = spot < idea.entry, reserved = reserveFor(idea, pending), fundInUseAtArm = capital?.let { fundInUse() })
         note("WAITING ${idea.index} ${idea.action}: buy when price is near %.1f (now %.1f), until %s".format(idea.entry, spot, expires.toLocalTime().withNano(0)))
         return "Waiting for ${idea.index} to reach %.1f (now %.1f)".format(idea.entry, spot)
+    }
+
+    /** What a waiting AI-trader entry holds back from the fund: its planned premium plus a cushion, at most its capital. */
+    private suspend fun reserveFor(idea: TradeIdea, p: PendingTrade): Double? {
+        val capital = p.capital ?: return null
+        val plan = runCatching { planner.plan(idea, riskBudgetForNew(), p.targetMultiple, p.maxLoss, capital) }.getOrNull()
+        if (plan == null || !plan.executable || plan.investment <= 0) return capital
+        return min(capital, plan.investment * RESERVE_CUSHION)
     }
 
     private suspend fun managePending(p: PendingTrade, now: ZonedDateTime) {
@@ -380,7 +397,9 @@ class AiTrader(
 
     private suspend fun enter(p: PendingTrade, idea: TradeIdea, now: ZonedDateTime): AiTrade? {
         val maxLoss = p.maxLoss ?: if (p.source == HIGH_RISK) settings.current.highRiskMaxLoss else null
-        val plan = runCatching { planner.plan(idea, riskBudgetForNew(), p.targetMultiple, maxLoss, p.capital) }
+        // Money other AI trades took while this one waited comes out of its capital, so the fund isn't double-spent.
+        val capital = p.capital?.let { c -> p.fundInUseAtArm?.let { at -> c - (fundInUse() - at).coerceAtLeast(0.0) } ?: c }
+        val plan = runCatching { planner.plan(idea, riskBudgetForNew(), p.targetMultiple, maxLoss, capital) }
             .getOrElse { note("No option plan for ${idea.index}: ${it.message}"); return null }
         if (!plan.executable) { note("Skipped ${plan.symbol}: ${plan.reason}"); return null }
         val lots = min(p.lots ?: plan.lots, plan.lots)
@@ -538,5 +557,7 @@ class AiTrader(
         private const val TRIGGER_SLACK = 0.0002
         /** SL limit price this far below the trigger so a fast-falling option still fills. */
         private const val SL_LIMIT_CUSHION = 0.10
+        /** A waiting entry reserves its planned premium x this, so a premium rise before entry still fits. */
+        private const val RESERVE_CUSHION = 1.25
     }
 }
